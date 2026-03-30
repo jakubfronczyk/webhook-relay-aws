@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexusSync | Service Status</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background-color: #0f1117;
+            color: #e2e8f0;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        header {
+            max-width: 900px;
+            margin: 0 auto 40px auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        header h1 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            color: #a78bfa;
+        }
+
+        .badge {
+            font-size: 0.75rem;
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .badge.operational {
+            background-color: #064e3b;
+            color: #6ee7b7;
+            border: 1px solid #065f46;
+        }
+
+        .main {
+            max-width: 900px;
+            margin: 0 auto;
+            display: grid;
+            gap: 16px;
+        }
+
+        .section-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #64748b;
+            margin-bottom: 8px;
+        }
+
+        .card {
+            background-color: #1e2130;
+            border: 1px solid #2d3148;
+            border-radius: 10px;
+            padding: 20px 24px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .card-header h2 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #cbd5e1;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #10b981;
+            box-shadow: 0 0 6px #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+        }
+
+        .metric {
+            background-color: #161926;
+            border: 1px solid #2d3148;
+            border-radius: 8px;
+            padding: 14px 16px;
+        }
+
+        .metric .label {
+            font-size: 0.7rem;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 6px;
+        }
+
+        .metric .value {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #e2e8f0;
+        }
+
+        .endpoint-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .endpoint-list li {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.875rem;
+            color: #94a3b8;
+        }
+
+        .endpoint-list code {
+            font-family: 'Courier New', monospace;
+            background-color: #161926;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: #a78bfa;
+            border: 1px solid #2d3148;
+        }
+
+        .tag {
+            font-size: 0.65rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .tag.get { background-color: #1e3a5f; color: #60a5fa; }
+        .tag.post { background-color: #1e3a2f; color: #4ade80; }
+
+        footer {
+            max-width: 900px;
+            margin: 24px auto 0 auto;
+            font-size: 0.75rem;
+            color: #334155;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>NEXUSSYNC</h1>
+        <span class="badge operational">All Systems Operational</span>
+    </header>
+
+    <div class="main">
+
+        <p class="section-label">Runtime</p>
+        <div class="card">
+            <div class="card-header">
+                <h2>Service Health</h2>
+                <div class="dot"></div>
+            </div>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="label">Version</div>
+                    <div class="value">1.0.0</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Uptime</div>
+                    <div class="value" id="uptime">--</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Host</div>
+                    <div class="value" id="hostname">--</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Platform</div>
+                    <div class="value">AWS ECS</div>
+                </div>
+            </div>
+        </div>
+
+        <p class="section-label">Data Layer</p>
+        <div class="card">
+            <div class="card-header">
+                <h2>Database</h2>
+                <span id="db-badge" class="badge operational">Connected</span>
+            </div>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="label">Engine</div>
+                    <div class="value">PostgreSQL 15</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Region</div>
+                    <div class="value">us-east-1</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Connection</div>
+                    <div class="value">Via env</div>
+                </div>
+            </div>
+        </div>
+
+        <p class="section-label">API</p>
+        <div class="card">
+            <div class="card-header">
+                <h2>Endpoints</h2>
+            </div>
+            <ul class="endpoint-list">
+                <li>
+                    <span><span class="tag get">GET</span>&nbsp;&nbsp;Health check</span>
+                    <code>/health</code>
+                </li>
+                <li>
+                    <span><span class="tag get">GET</span>&nbsp;&nbsp;API documentation</span>
+                    <code>/docs</code>
+                </li>
+                <li>
+                    <span><span class="tag get">GET</span>&nbsp;&nbsp;Metrics</span>
+                    <code>/metrics</code>
+                </li>
+                <li>
+                    <span><span class="tag post">POST</span>&nbsp;&nbsp;Sync job</span>
+                    <code>/api/v1/sync</code>
+                </li>
+            </ul>
+        </div>
+
+    </div>
+
+    <footer id="footer">Checked health endpoint...</footer>
+
+    <script>
+        const start = Date.now();
+
+        function pad(n) { return String(n).padStart(2, '0'); }
+
+        setInterval(() => {
+            const s = Math.floor((Date.now() - start) / 1000);
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            document.getElementById('uptime').textContent =
+                h > 0 ? `${h}h ${pad(m)}m` : `${pad(m)}m ${pad(sec)}s`;
+        }, 1000);
+
+        document.getElementById('hostname').textContent =
+            window.location.hostname || 'localhost';
+
+        fetch('/health')
+            .then(r => r.text())
+            .then(() => {
+                document.getElementById('footer').textContent =
+                    'Last health check: ' + new Date().toUTCString();
+            })
+            .catch(() => {
+                document.getElementById('db-badge').className = 'badge';
+                document.getElementById('db-badge').style.cssText =
+                    'background:#450a0a;color:#f87171;border:1px solid #7f1d1d';
+                document.getElementById('db-badge').textContent = 'Unreachable';
+                document.getElementById('footer').textContent = 'Health check failed.';
+            });
+    </script>
+</body>
+</html>

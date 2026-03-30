@@ -1,0 +1,19 @@
+# Terraform files that should not be committed
+*.tfvars
+*.tfvars.json
+terraform.tfstate
+terraform.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# AWS credentials and sensitive files
+.aws/
+*.pem
+*.key
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
