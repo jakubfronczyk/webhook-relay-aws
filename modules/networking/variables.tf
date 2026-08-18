@@ -8,6 +8,11 @@ variable "environment" {
   type        = string
 }
 
+variable "project_name" {
+  description = "Project name, used as the prefix for resource Name tags"
+  type        = string
+}
+
 variable "public_subnet_cidr" {
   description = "CIDR block for the first public subnet"
   type        = string

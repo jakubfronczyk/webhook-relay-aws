@@ -7,13 +7,44 @@ variable "aws_region" {
 variable "environment" {
   description = "Environment name (e.g., dev, staging, prod)"
   type        = string
-  default     = "challenge"
+  default     = "dev"
 }
 
 variable "project_name" {
   description = "Name of the project"
   type        = string
-  default     = "nexussync"
+  default     = "webhook-relay"
+}
+
+# Networking
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "public_subnet_cidr" {
+  description = "CIDR block for the first public subnet (AZ a)"
+  type        = string
+  default     = "10.0.1.0/24"
+}
+
+variable "public_subnet_secondary_cidr" {
+  description = "CIDR block for the second public subnet (AZ b)"
+  type        = string
+  default     = "10.0.2.0/24"
+}
+
+variable "private_subnet_cidr" {
+  description = "CIDR block for the first private subnet (AZ a)"
+  type        = string
+  default     = "10.0.11.0/24"
+}
+
+variable "private_subnet_secondary_cidr" {
+  description = "CIDR block for the second private subnet (AZ b)"
+  type        = string
+  default     = "10.0.12.0/24"
 }
 
 # AWS Credentials (optional - can use environment variables or AWS CLI config instead)

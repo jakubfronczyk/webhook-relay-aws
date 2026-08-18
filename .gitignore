@@ -1,15 +1,26 @@
-# Terraform files that should not be committed
+# Terraform
 *.tfvars
 *.tfvars.json
 terraform.tfstate
 terraform.tfstate.*
 .terraform/
-.terraform.lock.hcl
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep the example file
+!terraform.tfvars.example
 
 # AWS credentials and sensitive files
 .aws/
 *.pem
 *.key
+
+# Internal working files — not for public repo
+CLAUDE.md
+docs/plans/
 
 # OS and editor files
 .DS_Store

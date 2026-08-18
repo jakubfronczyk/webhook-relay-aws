@@ -1,11 +1,22 @@
-# Copy this file to terraform.tfvars and fill in your actual values
-# terraform.tfvars is gitignored and will not be committed
+# Copy this file to terraform.tfvars and fill in your actual values.
+# terraform.tfvars is gitignored and will not be committed.
 
-# AWS Configuration
-aws_region            = "us-east-1"
-aws_access_key_id     = "YOUR_ACCESS_KEY_ID"
-aws_secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+# AWS configuration
+aws_region = "us-east-1"
 
-# Project Configuration
+# Credentials are optional here — the provider also reads the standard
+# AWS_* environment variables or your AWS CLI profile, which is preferred.
+# aws_access_key_id     = "YOUR_ACCESS_KEY_ID"
+# aws_secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+# aws_session_token     = "YOUR_SESSION_TOKEN"
+
+# Project configuration
 environment  = "dev"
-project_name = "nexussync"
+project_name = "webhook-relay"
+
+# Network layout
+vpc_cidr                      = "10.0.0.0/16"
+public_subnet_cidr            = "10.0.1.0/24"
+public_subnet_secondary_cidr  = "10.0.2.0/24"
+private_subnet_cidr           = "10.0.11.0/24"
+private_subnet_secondary_cidr = "10.0.12.0/24"

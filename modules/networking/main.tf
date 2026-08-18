@@ -8,7 +8,7 @@ resource "aws_vpc" "main" {
   enable_dns_support   = true
 
   tags = {
-    Name = "nexussync-vpc"
+    Name = "${var.project_name}-vpc"
   }
 }
 
@@ -19,7 +19,7 @@ resource "aws_subnet" "public" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "nexussync-public-subnet"
+    Name = "${var.project_name}-public-subnet"
   }
 }
 
@@ -29,7 +29,7 @@ resource "aws_subnet" "public_secondary" {
   availability_zone = data.aws_availability_zones.available.names[1]
 
   tags = {
-    Name = "nexussync-public-subnet-2"
+    Name = "${var.project_name}-public-subnet-2"
   }
 }
 
@@ -37,7 +37,7 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
   tags = {
-    Name = "nexussync-igw"
+    Name = "${var.project_name}-igw"
   }
 }
 
@@ -49,7 +49,7 @@ resource "aws_route_table" "public" {
   }
 
   tags = {
-    Name = "nexussync-public-rt"
+    Name = "${var.project_name}-public-rt"
   }
 }
 
@@ -69,7 +69,7 @@ resource "aws_subnet" "private" {
   availability_zone = data.aws_availability_zones.available.names[0]
 
   tags = {
-    Name = "nexussync-private-subnet"
+    Name = "${var.project_name}-private-subnet"
   }
 }
 
@@ -79,7 +79,7 @@ resource "aws_subnet" "private_secondary" {
   availability_zone = data.aws_availability_zones.available.names[1]
 
   tags = {
-    Name = "nexussync-private-subnet-2"
+    Name = "${var.project_name}-private-subnet-2"
   }
 }
 
@@ -87,7 +87,7 @@ resource "aws_eip" "nat" {
   domain = "vpc"
 
   tags = {
-    Name = "nexussync-nat-eip"
+    Name = "${var.project_name}-nat-eip"
   }
 }
 
@@ -96,7 +96,7 @@ resource "aws_nat_gateway" "main" {
   subnet_id     = aws_subnet.public.id
 
   tags = {
-    Name = "nexussync-nat"
+    Name = "${var.project_name}-nat"
   }
 
   depends_on = [aws_internet_gateway.main]
@@ -110,7 +110,7 @@ resource "aws_route_table" "private" {
   }
 
   tags = {
-    Name = "nexussync-private-rt"
+    Name = "${var.project_name}-private-rt"
   }
 }
 

@@ -1,193 +1,207 @@
-# aws-terraform-ecs-setup
+# webhook-relay-aws
 
-Production-grade AWS infrastructure for a containerised API platform — built with Terraform, structured with modules, and hardened against the most common IaC security mistakes.
-
-The starting point was a functional but insecure monolithic `main.tf`: public database, hardcoded passwords, wildcard security groups, no load balancer, no auto-scaling. The goal was to turn it into something you'd actually run in production.
+Multi-service event delivery platform on AWS ECS Fargate — Terraform modules, SQS-backed
+workers autoscaling on queue depth, private RDS, least-privilege IAM.
 
 ---
 
-## The problems with the original code
+## The system
 
-| Issue | Risk | Fix |
+`webhook-relay` is the sender side of a webhook system — the component that POSTs to a
+customer's URL when something happens in your product, and keeps retrying until it lands.
+
+```
+  caller                       relay                      subscriber URL
+    │                                                           │
+    │ POST /events ──▶ [store + enqueue] ──▶ 202 (instant)       │
+    │                       │                                    │
+    │                       ├─ attempt 1 ──────────────────▶ 500 ✗
+    │                       ├─ attempt 2 (+30s) ───────────▶ timeout ✗
+    │                       └─ attempt 3 (+2m) ────────────▶ 200 ✓
+    │
+    └── never waited for any of it
+```
+
+Accepting an event and delivering it are different problems. Accepting must be fast and
+always available — the caller is waiting. Delivering is slow, unreliable, and depends
+entirely on infrastructure someone else operates. Putting both in one process means a
+customer's dead endpoint degrades your ingest path.
+
+So they are two services, and the infrastructure exists to serve that split:
+
+| | `api` | `worker` |
 |---|---|---|
-| `password = "password123"` in plain text | Any git clone leaks credentials | AWS Secrets Manager |
-| `publicly_accessible = true` on RDS | Database port open to the internet | Move to private subnet |
-| Security group allows all ports (`0–65535`) from `0.0.0.0/0` | Every port on every container exposed globally | Least-privilege SGs: ALB → ECS → RDS chain |
-| DB security group: `cidr_blocks = ["0.0.0.0/0"]` on port 5432 | Postgres open to the internet | SG source reference — only ECS can reach RDS |
-| ECS and RDS in public subnets | Direct internet exposure for compute and data | Private subnets + NAT Gateway |
-| Single ECS task, no load balancer | Single point of failure | ALB + target group + health checks |
-| `desired_count = 1`, no auto-scaling | No resilience under load | ECS auto-scaling policy on CPU |
-| `retention_in_days = 7` | Logs gone before any incident investigation | 30 days minimum |
-| Everything in one flat `main.tf` | Unreadable, untestable, impossible to reuse | Four Terraform modules |
+| Responsibility | accept, validate, persist, enqueue, `202` | drain queue, deliver, retry, record |
+| Traffic shape | steady, latency-critical | bursty, latency-tolerant |
+| Scaling signal | ALB request count per target | SQS queue depth |
+| Network exposure | public, behind the ALB | private, no inbound rules |
+| IAM permissions | `sqs:SendMessage` | `sqs:ReceiveMessage`, `sqs:DeleteMessage` |
+| Egress via NAT | not required | required — calls arbitrary customer URLs |
+| Failure impact | requests rejected | delivery delayed |
 
 ---
 
 ## Architecture
 
 ```
-                          Internet
-                              │
-                    ┌─────────▼──────────┐
-                    │  Application Load   │
-                    │  Balancer (public)  │
-                    └─────────┬──────────┘
-                              │ port 80 / 443
-              ┌───────────────┼───────────────┐
-              │               │               │
-       AZ-1 (public)   AZ-2 (public)     NAT Gateway
-              │               │               │
-    ──────────┼───────────────┼───────────────┼── private boundary ──
-              │               │               │
-       ┌──────▼──────┐ ┌──────▼──────┐        │ (outbound only)
-       │ ECS Fargate │ │ ECS Fargate │◄────────┘
-       │  container  │ │  container  │
-       └──────┬──────┘ └──────┬──────┘
-              │               │  port 5432 only (from ECS SG)
-       ┌──────▼───────────────▼──────┐
-       │     RDS PostgreSQL          │
-       │     (private subnet,        │
-       │      multi-AZ subnet group) │
-       └─────────────────────────────┘
+                              Internet
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  ALB  (public subnets)   │
+                    └────────────┬─────────────┘
+                                 │
+  ── private boundary ───────────┼──────────────────────────────────────
+                                 │
+        ┌────────────────────────▼──────────┐         ┌──────────────┐
+        │  ECS service: webhook-api         │──send──▶│  SQS + DLQ   │
+        │  Fargate, 2 AZs, scales on RPS    │         └──────┬───────┘
+        └────────────────┬──────────────────┘                │ receive
+                         │                    ┌───────────────▼─────────┐
+                         │                    │ ECS service: webhook-   │
+                         │                    │ worker — no ALB, scales │
+                         │                    │ on queue depth          │
+                         │                    └───────┬─────────┬───────┘
+                         │ :5432                      │ :5432   │ :443 out
+              ┌──────────▼────────────────────────────▼───┐     │
+              │        RDS PostgreSQL (private)           │     │
+              └───────────────────────────────────────────┘     ▼
+                                                      NAT GW ──▶ subscribers
 ```
 
-Traffic enters at the ALB — the only public-facing resource. ECS containers live in private subnets and are unreachable from the internet directly. RDS only accepts connections from the ECS security group, not from any CIDR range.
+The ALB is the only resource with a public address. Both ECS services run in private
+subnets; the worker reaches the internet outbound through the NAT gateway and accepts no
+inbound connections at all.
+
+### Network layout
+
+| Tier | Subnets | Reachable from |
+|---|---|---|
+| Load balancer | 2 public, one per AZ | the internet |
+| ECS tasks | 2 private, one per AZ | the ALB (api only) |
+| RDS | same private subnets, dedicated subnet group | the ECS security groups |
+
+Two availability zones throughout: the ALB requires subnets in at least two, and the RDS
+subnet group and ECS services follow the same boundary so a single AZ failure degrades
+rather than stops the system.
+
+### Security groups
+
+```
+0.0.0.0/0 ──▶ alb-sg ──▶ api-sg ──┐
+                                  ├──▶ rds-sg  (:5432, SG source, never a CIDR)
+              (no ingress) worker-sg ──┘
+                                  └──▶ 0.0.0.0/0 :443 egress only, via NAT
+```
+
+Rules reference **other security groups** as their source rather than CIDR blocks. A new
+task placed in `api-sg` gains database access by membership, so no IP addresses are managed
+by hand as tasks are replaced. `worker-sg` declares no ingress rules — nothing on the
+network can open a connection to a worker.
+
+### Delivery semantics
+
+SQS owns the retry schedule and the failure boundary. The worker deletes a message only
+after a `2xx` from the subscriber; anything else leaves the message to reappear after its
+visibility timeout, and the redrive policy moves it to the dead-letter queue after a fixed
+number of attempts. Retries are therefore a queue configuration rather than application
+code, and a message that can never be delivered ends up somewhere inspectable instead of
+looping forever.
+
+Delivery is at-least-once. Subscribers are expected to be idempotent, which is the same
+contract Stripe and GitHub publish for their own webhooks.
 
 ---
 
-## What was built
+## Application
 
-### Networking module
-- VPC with DNS enabled
-- 2 public subnets across 2 AZs (ALB only)
-- 2 private subnets across 2 AZs (ECS + RDS)
-- Internet Gateway for public subnets
-- NAT Gateway + Elastic IP for private subnet outbound traffic
-- Separate route tables: public → IGW, private → NAT
+Four endpoints, three tables. The application is intentionally small — its purpose is to
+exercise the infrastructure honestly, not to be a product.
 
-### Security module
-- ALB security group: accepts `80`/`443` from `0.0.0.0/0`
-- ECS security group: accepts traffic **only from the ALB security group** (not a CIDR range)
-- Database security group: accepts `5432` **only from the ECS security group**
+```
+POST /events            {"type":"invoice.paid","payload":{...}}      → 202 {event_id}
+POST /subscriptions     {"url":"https://...","event_type":"..."}     → 201
+GET  /events/{id}       event and its delivery attempts
+GET  /healthz           ALB health check target
+```
 
-This is the security group chain pattern — each layer only trusts the layer in front of it.
+```sql
+subscriptions      (id, url, event_type, secret, active, created_at)
+events             (id, type, payload jsonb, created_at)
+delivery_attempts  (id, event_id, subscription_id, attempt_no,
+                    status_code, error, duration_ms, attempted_at)
+```
 
-### Database module
-- RDS PostgreSQL 15 in private subnets
-- `publicly_accessible = false`
-- Credentials pulled from AWS Secrets Manager at apply time — no plaintext anywhere
-- Multi-AZ subnet group
-- Automated backups enabled, `skip_final_snapshot = false`
-
-### Compute module
-- ECS Fargate cluster in private subnets
-- Task definition pulls DB credentials from Secrets Manager via environment injection
-- ALB target group + listener with health checks
-- ECS service auto-scaling: scale out when CPU > 70%, scale in when CPU < 30%
-- IAM execution role with least-privilege policy (ECS task execution + Secrets Manager read)
-- CloudWatch log group: 30-day retention
+Each delivery is signed with an HMAC of the request body using the subscription's secret,
+so a subscriber can verify the request genuinely came from the relay.
 
 ---
 
-## Module structure
+## Repository layout
 
 ```
-aws-terraform-ecs-setup/
-│
-├── main.tf                    ← calls modules, wires outputs between them
-├── variables.tf               ← root inputs
-├── outputs.tf                 ← ALB DNS, cluster name
-├── terraform.tfvars.example
-│
-└── modules/
-    ├── networking/
-    │   ├── main.tf            ← VPC, subnets, IGW, NAT, route tables
-    │   ├── variables.tf
-    │   └── outputs.tf         ← vpc_id, subnet IDs
-    │
-    ├── security/
-    │   ├── main.tf            ← ALB, ECS, RDS security groups
-    │   ├── variables.tf
-    │   └── outputs.tf         ← security group IDs
-    │
-    ├── database/
-    │   ├── main.tf            ← RDS, subnet group, Secrets Manager
-    │   ├── variables.tf
-    │   └── outputs.tf         ← db_endpoint, secret_arn
-    │
-    └── compute/
-        ├── main.tf            ← ECS cluster, task definition, service, ALB, auto-scaling, IAM, CloudWatch
-        ├── variables.tf
-        └── outputs.tf         ← alb_dns_name
+main.tf                  module composition and provider configuration
+variables.tf             root inputs
+outputs.tf               ALB DNS name, VPC and subnet IDs
+modules/
+  networking/            VPC, public and private subnets, IGW, NAT gateway, route tables
+  security/              security groups: alb, api, worker, rds
+  messaging/             SQS queue, dead-letter queue, redrive policy
+  registry/              ECR repositories and image lifecycle policy
+  database/              RDS PostgreSQL, subnet group, Secrets Manager integration
+  alb/                   load balancer, target group, listener, health checks
+  ecs/                   cluster, task definitions, services, IAM roles, autoscaling, logs
+app/
+  cmd/api/               ingest service
+  cmd/worker/            delivery service
+  migrations/            schema
 ```
+
+Security groups live in their own module rather than beside the resources they protect, so
+the trust relationships between tiers are visible in one file and wired explicitly in
+`main.tf` instead of being implied across several modules.
 
 ---
 
-## Security group chain
+## Design decisions
 
-```
-Internet → ALB SG (0.0.0.0/0:443) → ECS SG (source: ALB SG) → RDS SG (source: ECS SG)
-```
+**SQS rather than a database-polling queue.** Delivery needs retries with backoff, a
+visibility timeout, and a dead-letter destination. All three are queue configuration in SQS
+and hand-written code against Postgres, and the worker's scaling signal — queue depth — is
+a CloudWatch metric that exists without instrumentation.
 
-The key rule: **security groups reference other security groups as sources, not CIDR blocks.** This means if you add a new ECS container in the same SG, it automatically gets DB access — no manual CIDR management.
+**Fargate rather than EC2.** The workload is two stateless services with bursty demand. EC2
+would add capacity management and AMI maintenance in exchange for cost savings that only
+matter at sustained scale.
+
+**NAT gateway rather than VPC endpoints.** The worker calls arbitrary customer URLs on the
+public internet, so it needs general egress regardless. VPC endpoints for SQS and Secrets
+Manager would reduce NAT data charges but cannot replace it.
+
+**Credentials in Secrets Manager.** The RDS password is generated and stored at apply time
+and injected into the task definition by reference, so it appears neither in the repository
+nor in `terraform.tfvars`.
+
+### Deliberately out of scope
+
+No TLS certificate or custom domain — the ALB serves HTTP on its AWS-assigned DNS name. No
+multi-region deployment. No exactly-once delivery, which is not achievable across a network
+boundary; the system provides at-least-once delivery and a documented idempotency contract.
 
 ---
 
-## Tech stack
-
-| Concern | Choice |
-|---|---|
-| IaC | Terraform ~> 5.0 AWS provider |
-| Compute | AWS ECS Fargate (serverless containers) |
-| Database | AWS RDS PostgreSQL 15 |
-| Load balancing | AWS ALB (Application Load Balancer) |
-| Secrets | AWS Secrets Manager |
-| Networking | Custom VPC, public/private subnets, NAT Gateway |
-| Observability | CloudWatch Logs (30-day retention) |
-| Auto-scaling | ECS Application Auto Scaling on CPU |
-
----
-
-## Deployment
+## Usage
 
 ```bash
-# Prerequisites: Terraform >= 1.0, AWS CLI configured
-
-# Copy and fill in your values
-cp terraform.tfvars.example terraform.tfvars
-
-# Initialise providers and modules
-terraform init
-
-# Review what will be created
-terraform plan
-
-# Deploy
+cp terraform.tfvars.example terraform.tfvars   # fill in region, project name, CIDRs
+terraform init                                  # download the AWS provider, link modules
+terraform plan                                  # review the diff before touching AWS
 terraform apply
-```
-
-After apply, the ALB DNS name is printed as an output:
-
-```bash
 terraform output alb_dns_name
 ```
-
-To tear down:
 
 ```bash
 terraform destroy
 ```
 
----
-
-## Infrastructure mental model — quick audit checklist
-
-When jumping into unfamiliar infrastructure, these 6 commands surface 80% of common problems in under a minute:
-
-```bash
-grep -r "password\|secret\|key" *.tf    # hardcoded credentials?
-grep "0.0.0.0/0" *.tf                   # what is open to the internet?
-grep "publicly_accessible" *.tf         # is the DB public?
-grep "desired_count" *.tf               # how many tasks are running?
-grep "retention_in_days" *.tf           # how long are logs kept?
-ls terraform.tfstate                    # is state stored locally?
-```
+The NAT gateway, ALB, and RDS instance bill hourly whether or not traffic flows —
+approximately $2–3 per day for this stack.
