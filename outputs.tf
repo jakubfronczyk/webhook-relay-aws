@@ -12,3 +12,13 @@ output "private_subnet_ids" {
   description = "IDs of the private subnets (ECS tasks, RDS)"
   value       = module.networking.private_subnet_ids
 }
+
+output "security_group_ids" {
+  description = "The four security groups in the chain"
+  value = {
+    alb    = module.security.alb_sg_id
+    api    = module.security.api_sg_id
+    worker = module.security.worker_sg_id
+    rds    = module.security.rds_sg_id
+  }
+}
