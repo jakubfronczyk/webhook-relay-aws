@@ -41,3 +41,11 @@ module "security" {
   vpc_id       = module.networking.vpc_id
   project_name = var.project_name
 }
+
+module "observability" {
+  source = "./modules/observability"
+
+  project_name       = var.project_name
+  monthly_budget_usd = var.monthly_budget_usd
+  alert_emails       = var.alert_emails
+}

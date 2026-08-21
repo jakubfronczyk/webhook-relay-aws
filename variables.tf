@@ -16,6 +16,18 @@ variable "project_name" {
   default     = "webhook-relay"
 }
 
+# Cost guardrail
+variable "monthly_budget_usd" {
+  description = "Monthly spend ceiling for the account, in USD"
+  type        = number
+  default     = 20
+}
+
+variable "alert_emails" {
+  description = "Email addresses that receive budget notifications"
+  type        = list(string)
+}
+
 # Networking
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"

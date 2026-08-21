@@ -14,6 +14,10 @@ aws_region = "us-east-1"
 environment  = "dev"
 project_name = "webhook-relay"
 
+# Cost guardrail. Required, the budget notifies nobody without it.
+monthly_budget_usd = 20
+alert_emails       = ["you@example.com"]
+
 # Network layout
 vpc_cidr                      = "10.0.0.0/16"
 public_subnet_cidr            = "10.0.1.0/24"
