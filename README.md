@@ -276,7 +276,7 @@ cp terraform.tfvars.example terraform.tfvars   # fill in region, project name, C
 terraform init                                  # download the AWS provider, link modules
 terraform plan                                  # review the diff before touching AWS
 terraform apply
-terraform output queue_url
+terraform output alb_dns_name
 ```
 
 ```bash

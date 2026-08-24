@@ -7,6 +7,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -52,10 +54,42 @@ func Load() (Config, error) {
 		// while its visibility timeout is already running.
 		BatchSize: int32(envInt("POLL_BATCH_SIZE", 8)),
 	}
+	// On Fargate there is no DATABASE_URL to hand over. RDS owns the master
+	// password and stores it as a JSON document in Secrets Manager, and the ECS
+	// task definition injects one key of it as DB_PASSWORD. The remaining parts
+	// are plain Terraform outputs, so the DSN is assembled here rather than
+	// interpolated into the task definition, which would put the password in the
+	// ECS console and in CloudWatch on every task start.
 	if c.DatabaseURL == "" {
-		return c, fmt.Errorf("DATABASE_URL is required")
+		c.DatabaseURL = databaseURLFromParts()
+	}
+	if c.DatabaseURL == "" {
+		return c, fmt.Errorf("DATABASE_URL, or DB_HOST with DB_PASSWORD, is required")
 	}
 	return c, nil
+}
+
+// databaseURLFromParts builds a DSN from discrete variables, returning "" when
+// the required ones are absent. url.UserPassword handles escaping, which matters
+// because an RDS-generated password contains punctuation that is not URL-safe.
+func databaseURLFromParts() string {
+	host, password := env("DB_HOST", ""), env("DB_PASSWORD", "")
+	if host == "" || password == "" {
+		return ""
+	}
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(env("DB_USER", "relay"), password),
+		Host:   net.JoinHostPort(host, env("DB_PORT", "5432")),
+		Path:   "/" + env("DB_NAME", "relay"),
+	}
+	q := u.Query()
+	// RDS presents a certificate signed by the Amazon RDS CA. require verifies
+	// the connection is encrypted without verifying that chain; verify-full needs
+	// the CA bundle in the image and is the production setting.
+	q.Set("sslmode", "require")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func env(key, def string) string {

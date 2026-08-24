@@ -39,6 +39,8 @@ module "security" {
 
   vpc_id       = module.networking.vpc_id
   project_name = var.project_name
+  api_port     = var.api_port
+  db_port      = var.db_port
 }
 
 module "observability" {
@@ -71,5 +73,48 @@ module "database" {
   private_subnet_ids = module.networking.private_subnet_ids
   rds_sg_id          = module.security.rds_sg_id
 
+  db_port        = var.db_port
   instance_class = var.db_instance_class
+}
+
+module "alb" {
+  source = "./modules/alb"
+
+  project_name      = var.project_name
+  vpc_id            = module.networking.vpc_id
+  public_subnet_ids = module.networking.public_subnet_ids
+  alb_sg_id         = module.security.alb_sg_id
+  api_port          = var.api_port
+}
+
+module "ecs" {
+  source = "./modules/ecs"
+
+  project_name = var.project_name
+  aws_region   = var.aws_region
+
+  private_subnet_ids = module.networking.private_subnet_ids
+  api_sg_id          = module.security.api_sg_id
+  worker_sg_id       = module.security.worker_sg_id
+  target_group_arn   = module.alb.target_group_arn
+
+  image_urls = module.registry.repository_urls
+  image_tag  = var.image_tag
+
+  queue_url = module.messaging.queue_url
+  queue_arn = module.messaging.queue_arn
+
+  db_host       = module.database.endpoint
+  db_port       = var.db_port
+  db_name       = module.database.db_name
+  db_username   = module.database.username
+  db_secret_arn = module.database.master_user_secret_arn
+
+  api_port           = var.api_port
+  worker_concurrency = var.worker_concurrency
+
+  # The api service registers targets with the load balancer, and the listener has to exist
+  # before that registration is accepted. Nothing in the arguments above expresses that, so
+  # it is stated here rather than left to chance.
+  depends_on = [module.alb]
 }

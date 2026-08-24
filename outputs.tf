@@ -42,3 +42,18 @@ output "database_endpoint" {
   description = "RDS hostname. Resolvable only from inside the VPC."
   value       = module.database.endpoint
 }
+
+output "alb_dns_name" {
+  description = "Public hostname of the load balancer. This is the URL the demo curls."
+  value       = module.alb.dns_name
+}
+
+output "ecs_cluster_name" {
+  description = "Cluster name, for aws ecs commands"
+  value       = module.ecs.cluster_name
+}
+
+output "worker_service_name" {
+  description = "worker service name. The durability demo scales this to zero at peak backlog."
+  value       = module.ecs.worker_service_name
+}

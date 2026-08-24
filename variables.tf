@@ -101,3 +101,32 @@ variable "db_instance_class" {
   type        = string
   default     = "db.t3.micro"
 }
+
+# Ports. Declared once here and passed to every module that needs them: the security group
+# rules, the load balancer target group, the container port, and the database. Left as
+# per-module defaults they drift, and the failure is a service nothing can reach with no
+# plan-time error.
+variable "api_port" {
+  description = "Port the api container listens on, and the ALB target group port"
+  type        = number
+  default     = 8080
+}
+
+variable "db_port" {
+  description = "Port the RDS instance listens on"
+  type        = number
+  default     = 5432
+}
+
+# Compute
+variable "image_tag" {
+  description = "Image tag the services run. Matches what just push produced."
+  type        = string
+  default     = "latest"
+}
+
+variable "worker_concurrency" {
+  description = "Concurrent deliveries per worker task"
+  type        = number
+  default     = 8
+}
