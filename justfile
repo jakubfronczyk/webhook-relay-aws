@@ -32,3 +32,49 @@ audit:
             count[g "-sg " dir]++; dir = "" } \
          END { for (k in count) printf "  %-18s %s\n", k, count[k] }' \
          modules/security/main.tf | sort
+
+# ---------------------------------------------------------------------------
+# The app, locally. No AWS account, no credentials, no cost.
+# Postgres stands in for RDS, ElasticMQ for SQS. Same code, same env vars.
+# ---------------------------------------------------------------------------
+
+# Unit tests: the retry curve and the HMAC scheme
+test:
+    cd app && go test ./...
+
+# Every delivery guarantee, asserted from a cold start. Exits non-zero when one
+# breaks. ~3 min, most of it waiting out real backoff and visibility timeouts.
+# KEEP_STACK=1 reuses the running stack instead of rebuilding.
+verify:
+    ./scripts/verify-local.sh
+
+# Bring up postgres, elasticmq, api, worker and the fake subscriber
+up-local:
+    docker compose up --build -d
+    @echo "api  http://localhost:8080"
+    @echo "sink http://localhost:9000/stats"
+
+down-local:
+    docker compose down -v
+
+logs service="":
+    docker compose logs -f {{ service }}
+
+# Happy path: subscribe the sink, POST an event, show the recorded attempt
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose up -d --force-recreate sink >/dev/null
+    sleep 2
+    curl -sf -X POST localhost:9000/reset >/dev/null
+    curl -sf -X POST localhost:8080/subscriptions \
+        -H 'content-type: application/json' \
+        -d '{"url":"http://sink:9000/hook","event_type":"invoice.paid"}' | jq .
+    id=$(curl -sf -X POST localhost:8080/events \
+        -H 'content-type: application/json' \
+        -d '{"type":"invoice.paid","payload":{"amount":4200,"currency":"eur"}}' \
+        | jq -r .event_id)
+    echo "accepted $id"
+    sleep 3
+    curl -sf "localhost:8080/events/$id" | jq .
+    curl -sf localhost:9000/stats | jq .

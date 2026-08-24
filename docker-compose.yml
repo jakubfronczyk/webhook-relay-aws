@@ -1,0 +1,110 @@
+# The whole system on a laptop, no AWS account and no credentials.
+#
+#   docker compose up --build
+#   just demo
+#
+# Postgres and ElasticMQ stand in for RDS and SQS. Everything else is the same
+# code and the same configuration surface that runs on Fargate.
+
+name: webhook-relay
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: relay
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.6.11
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf:ro
+    ports:
+      - "9324:9324"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9324/?Action=ListQueues"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./app
+      args:
+        BINARY: api
+    environment:
+      DATABASE_URL: postgres://relay:relay@postgres:5432/relay?sslmode=disable
+      AWS_ENDPOINT_URL_SQS: http://elasticmq:9324
+      QUEUE_URL: http://elasticmq:9324/000000000000/webhook-relay-deliveries
+      AWS_REGION: us-east-1
+      LISTEN_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./app
+      args:
+        BINARY: worker
+    environment:
+      DATABASE_URL: postgres://relay:relay@postgres:5432/relay?sslmode=disable
+      AWS_ENDPOINT_URL_SQS: http://elasticmq:9324
+      QUEUE_URL: http://elasticmq:9324/000000000000/webhook-relay-deliveries
+      AWS_REGION: us-east-1
+      # Compressed retry curve so the demo finishes in a minute instead of ten.
+      # AWS keeps the 30s default; this is the only behavioural difference.
+      BACKOFF_BASE: 2s
+      BACKOFF_MAX: 30s
+      POLL_WAIT_SECONDS: "5"
+      WORKER_CONCURRENCY: "8"
+    depends_on:
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      elasticmq:
+        condition: service_healthy
+
+  # Not part of the system. A fake subscriber that counts what it receives, so
+  # "zero events lost" reconciles against delivery_attempts.
+  sink:
+    build:
+      context: ./app
+      args:
+        BINARY: sink
+    environment:
+      LISTEN_ADDR: ":9000"
+      # Raise to N and the sink rejects every delivery whose attempt number is
+      # <= N, which is how the retry-and-DLQ proof is produced on demand.
+      FAIL_UNTIL_ATTEMPT: "${FAIL_UNTIL_ATTEMPT:-0}"
+      # Set to a subscription's secret and the sink verifies the HMAC with the
+      # same code that produced it, which is what turns "signed" into a proof.
+      SUBSCRIPTION_SECRET: "${SUBSCRIPTION_SECRET:-}"
+      # Simulates a slow subscriber, so there is a drain long enough to
+      # interrupt when proving nothing is lost when the fleet dies.
+      RESPONSE_DELAY: "${RESPONSE_DELAY:-0s}"
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9000/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

@@ -33,9 +33,9 @@ So they are two services, and the infrastructure exists to serve that split:
 |---|---|---|
 | Responsibility | accept, validate, persist, enqueue, `202` | drain queue, deliver, retry, record |
 | Traffic shape | steady, latency-critical | bursty, latency-tolerant |
-| Scaling signal | ALB request count per target | SQS queue depth |
+| Scaling signal | ALB request count per target | SQS backlog per task |
 | Network exposure | public, behind the ALB | private, no inbound rules |
-| IAM permissions | `sqs:SendMessage` | `sqs:ReceiveMessage`, `sqs:DeleteMessage` |
+| IAM permissions | `sqs:SendMessage` | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` |
 | Egress via NAT | not required | required — calls arbitrary customer URLs |
 | Failure impact | requests rejected | delivery delayed |
 
@@ -100,15 +100,25 @@ network can open a connection to a worker.
 
 ### Delivery semantics
 
-SQS owns the retry schedule and the failure boundary. The worker deletes a message only
-after a `2xx` from the subscriber; anything else leaves the message to reappear after its
-visibility timeout, and the redrive policy moves it to the dead-letter queue after a fixed
-number of attempts. Retries are therefore a queue configuration rather than application
-code, and a message that can never be delivered ends up somewhere inspectable instead of
-looping forever.
+The split is worth stating precisely, because half of it is queue configuration and half
+of it is application code.
+
+**SQS owns** durability, redelivery, the attempt ceiling (`maxReceiveCount`) and the
+dead-letter queue. A message that can never be delivered ends up somewhere inspectable
+instead of looping forever, and that is configuration, not code.
+
+**The worker owns** the backoff curve and the signature. SQS has no exponential-backoff
+setting — only a single fixed visibility timeout — so the growing interval comes from the
+worker calling `ChangeMessageVisibility` per message with a delay derived from
+`ApproximateReceiveCount`. It deletes a message only after every subscriber for that event
+has returned `2xx`.
 
 Delivery is at-least-once. Subscribers are expected to be idempotent, which is the same
-contract Stripe and GitHub publish for their own webhooks.
+contract Stripe and GitHub publish for their own webhooks. Two consequences the code
+handles explicitly: a subscriber that already returned `2xx` is skipped when a message is
+redelivered because a *different* subscriber failed, and a request that times out is
+retried even though the subscriber may well have processed it — from the sender's side those
+two outcomes are indistinguishable.
 
 ---
 
@@ -136,6 +146,60 @@ so a subscriber can verify the request genuinely came from the relay.
 
 ---
 
+## Run it locally
+
+No AWS account, no credentials, no cost. Postgres stands in for RDS and
+[ElasticMQ](https://github.com/softwaremill/elasticmq) for SQS — ElasticMQ speaks the SQS
+wire protocol, so the application has one queue implementation and only the endpoint URL
+changes between a laptop and Fargate.
+
+```bash
+just up-local     # postgres, elasticmq, api, worker, and a fake subscriber
+just demo         # register the subscriber, POST an event, show the recorded attempt
+just verify       # assert every guarantee below, from a cold start
+just down-local
+```
+
+`just verify` is the one that matters. It wipes the stack, rebuilds it, and asserts each
+claim on this page rather than printing output for a human to eyeball. Delivery semantics
+are the easiest thing in a system like this to believe without evidence, so they are the
+part that most needs a test that can fail. It takes about three minutes, most of it spent
+waiting out real backoff and visibility timeouts.
+
+```
+── retry curve
+  ✓ attempts are 1, 2, 3 and fail, fail, succeed
+  ✓ first retry waits ~2s (got 2s)
+  ✓ second retry waits ~4s (got 4s)
+
+── poison message reaches the dlq
+  ✓ exactly maxReceiveCount attempts, then it stops
+  ✓ the message moved to the dead-letter queue
+
+── durability: the fleet dies mid-drain
+  ✓ the api accepted all 200
+  ✓ every accepted event reached the subscriber
+  ✓ the subscriber's own tally agrees
+  ✓ duplicates stayed within WORKER_CONCURRENCY (8)
+
+PASS  22 checks
+```
+
+Attempt numbers come from SQS's `ApproximateReceiveCount` rather than from anything the
+worker remembers, and the attempt ceiling is the queue's `maxReceiveCount` rather than
+worker code. The last block is the interesting one: the worker fleet is `SIGKILL`ed at peak
+backlog, and afterwards three independently kept counts — the events table, the
+`delivery_attempts` table, and a tally kept by the subscriber itself — agree that nothing
+was lost.
+
+Eight deliveries arrived twice, and the eight is not noise: it equals `WORKER_CONCURRENCY`,
+because those are exactly the deliveries in flight when the process died — already accepted
+by the subscriber, never acknowledged to SQS, so redelivered once the visibility timeout
+expired. That is what at-least-once means, and it is why every delivery carries a stable
+event id.
+
+---
+
 ## Repository layout
 
 ```
@@ -153,7 +217,18 @@ modules/
 app/
   cmd/api/               ingest service
   cmd/worker/            delivery service
-  migrations/            schema
+  cmd/sink/              fake subscriber, counts what it receives — test fixture, not part
+                         of the system
+  internal/queue/        one SQS client for both ElasticMQ and AWS
+  internal/relay/        the delivery loop, the backoff curve
+  internal/sign/         HMAC signing, and the verification half the sink uses
+  internal/store/        every query against Postgres
+  migrations/            schema, embedded into the binaries
+  Dockerfile             one build, parameterised by --build-arg BINARY
+docker-compose.yml       the whole system locally: no AWS account, no credentials
+elasticmq.conf           local stand-in for SQS, same wire protocol
+justfile                 terraform checks, the network-policy audit, the local demos
+scripts/verify-local.sh  asserts every delivery guarantee from a cold start
 ```
 
 Security groups live in their own module rather than beside the resources they protect, so
@@ -177,9 +252,10 @@ matter at sustained scale.
 public internet, so it needs general egress regardless. VPC endpoints for SQS and Secrets
 Manager would reduce NAT data charges but cannot replace it.
 
-**Credentials in Secrets Manager.** The RDS password is generated and stored at apply time
-and injected into the task definition by reference, so it appears neither in the repository
-nor in `terraform.tfvars`.
+**The database password is RDS-managed.** `manage_master_user_password = true` makes RDS
+create and own the Secrets Manager secret, so the value never enters Terraform state. The
+common alternative — `random_password` plus a secret version — writes the password into
+`terraform.tfstate` in plaintext.
 
 ### Deliberately out of scope
 
