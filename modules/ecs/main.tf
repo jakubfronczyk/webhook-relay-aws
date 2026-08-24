@@ -319,6 +319,15 @@ resource "aws_ecs_service" "api" {
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
+  # Without this, a revision that cannot start — a bad image, a missing permission, a failing
+  # health check — is retried forever and the service sits in a replacement loop until someone
+  # notices. The circuit breaker stops after a threshold ECS derives from the desired count,
+  # and rollback returns the service to the last revision that reached a steady state.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   tags = {
     Name = "${var.project_name}-api"
   }
@@ -347,6 +356,14 @@ resource "aws_ecs_service" "worker" {
   # so a deploy replaces rather than doubles, and does not need spare capacity to proceed.
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
+
+  # A worker has no health check, so "reached a steady state" means the task stayed running.
+  # That still catches the failures that matter here: an image for the wrong architecture, a
+  # missing task role, a DSN that will not connect.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   tags = {
     Name = "${var.project_name}-worker"

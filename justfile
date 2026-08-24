@@ -15,8 +15,10 @@ fmt:
 validate:
     terraform validate
 
-# Reproducible evidence for the claims the README makes about network policy.
-# Counts rule arguments, never lines of text, so a comment cannot inflate a number.
+# Counts rule arguments, never lines of text, so a comment cannot inflate a
+# number.
+
+# Reproducible evidence for the README's network-policy claims
 audit:
     @echo "rules opening something to the whole internet:"
     @grep -rn 'cidr_ipv4 *= *"0.0.0.0/0"' modules/ | sed 's/^/  /'
@@ -42,9 +44,10 @@ audit:
 test:
     cd app && go test ./...
 
-# Every delivery guarantee, asserted from a cold start. Exits non-zero when one
-# breaks. ~3 min, most of it waiting out real backoff and visibility timeouts.
-# KEEP_STACK=1 reuses the running stack instead of rebuilding.
+# Exits non-zero when a guarantee breaks. ~3 min, most of it waiting out real
+# backoff and visibility timeouts. KEEP_STACK=1 reuses the running stack.
+
+# Assert every delivery guarantee from a cold start
 verify:
     ./scripts/verify-local.sh
 
@@ -85,32 +88,51 @@ demo:
 # protection.
 # ---------------------------------------------------------------------------
 
-deploy:
-    terraform apply
+# The short commit, with -dirty appended when the tree has uncommitted changes.
+# Immutable per build, and that is the point — see `deploy`.
 
-# The actual cost control. ~$2.05/day if left running.
+# Image tag for the current working tree
+version:
+    @git describe --always --dirty --abbrev=8
+
+# The tag has to change for a deploy to happen at all. A task definition that is
+# byte-identical produces no Terraform diff, so ECS is never told to do anything
+# and the service keeps running the old image. Tagging everything `latest` and
+# re-applying looks like a deploy and is a no-op.
+
+# Apply, pinning both services to the image built from this working tree
+deploy:
+    terraform apply -var image_tag=$(just version)
+
+# Destroy everything. The actual cost control — ~$2.05/day if left running.
 down:
     terraform destroy
 
-# Build both service images and push them to ECR. Terraform cannot build images,
-# so this is a recipe rather than a resource.
+# Terraform cannot build images, so this is a recipe rather than a resource.
 #
-# Built natively for ARM64. Fargate defaults to x86_64, and a darwin/arm64 build
-# deployed onto that fails at runtime with "exec format error" — the single most
-# common first deploy failure. ARM64 Fargate is also about 20% cheaper, so the
-# task definitions in Phase 4 set runtime_platform ARM64 and the build stays
-# native. The alternative is --platform linux/amd64 here and emulated builds.
-push tag="latest":
+# Built natively for ARM64. Fargate defaults to x86_64, and an arm64 image
+# deployed onto that fails at task start with "exec format error" — the most
+# common first-deploy failure in this shape of project. The task definitions set
+# runtime_platform ARM64 to match, and ARM64 Fargate is also about 20% cheaper.
+# Each image gets both an immutable tag and `latest`; `deploy` uses the former.
+
+# Build both service images for ARM64 and push them to ECR
+push:
     #!/usr/bin/env bash
     set -euo pipefail
+    tag=$(just version)
     urls=$(terraform output -json ecr_repository_urls)
     registry=$(jq -r '.api' <<<"$urls" | cut -d/ -f1)
     region=$(cut -d. -f4 <<<"$registry")
     aws ecr get-login-password --region "$region" \
       | docker login --username AWS --password-stdin "$registry"
-    for svc in api worker; do
-      url=$(jq -r ".$svc" <<<"$urls")
-      echo "building $svc for linux/arm64"
-      docker build --platform linux/arm64 --build-arg BINARY="$svc" -t "$url:{{ tag }}" app/
-      docker push "$url:{{ tag }}"
+    for svc in $(jq -r 'keys[]' <<<"$urls"); do
+      url=$(jq -r ".\"$svc\"" <<<"$urls")
+      echo "building $svc for linux/arm64 as $tag"
+      docker build --platform linux/arm64 --build-arg BINARY="$svc" \
+        -t "$url:$tag" -t "$url:latest" app/
+      docker push "$url:$tag"
+      docker push "$url:latest"
     done
+    echo
+    echo "pushed $tag — now: just deploy"
