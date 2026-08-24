@@ -1,6 +1,5 @@
-// Package api is the public half of the relay: accept fast, persist durably,
-// enqueue, return 202. It never makes an outbound delivery, which is why its
-// latency is flat while the backlog spikes.
+// Package api accepts events: persist, enqueue, return 202. It makes no
+// outbound deliveries.
 package api
 
 import (
@@ -21,10 +20,8 @@ type Server struct {
 	queue *queue.Queue
 	log   *slog.Logger
 
-	// allowInsecure permits http:// subscriber URLs. False in AWS, where the
-	// worker's security group opens :443 only, so an http subscriber would time
-	// out on every attempt and reach the DLQ looking like a broken endpoint. The
-	// compose stack sets it true because its fake subscriber speaks http.
+	// allowInsecure permits http:// subscriber URLs. False in AWS, where worker
+	// egress opens :443 only; the compose sink speaks http and sets it true.
 	allowInsecure bool
 }
 
@@ -32,8 +29,7 @@ func New(st *store.Store, q *queue.Queue, log *slog.Logger, allowInsecure bool) 
 	return &Server{store: st, queue: q, log: log, allowInsecure: allowInsecure}
 }
 
-// Routes uses the stdlib method-and-wildcard patterns from Go 1.22. A router
-// dependency would buy nothing at four routes.
+// Routes uses the stdlib method-and-wildcard patterns from Go 1.22.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
@@ -69,16 +65,15 @@ func (s *Server) createEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enqueue after the row exists. If this fails the caller gets a 500 and
-	// retries; the orphaned row is recoverable, an unresolvable message is not.
+	// Enqueued after the row exists; an orphaned row is recoverable, an
+	// unresolvable message is not.
 	if err := s.queue.Send(r.Context(), queue.Delivery{EventID: ev.ID, EventType: ev.Type}); err != nil {
 		s.log.Error("enqueue event", "event_id", ev.ID, "err", err)
 		writeError(w, http.StatusInternalServerError, "could not enqueue event")
 		return
 	}
 
-	// 202, not 201: the event is accepted and durable, and delivery has not
-	// happened yet. Saying 201 would imply the work is done.
+	// 202, not 201: the event is durable and delivery has not happened yet.
 	writeJSON(w, http.StatusAccepted, map[string]string{"event_id": ev.ID})
 }
 
@@ -110,11 +105,9 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The signing secret is returned exactly once, on the call that creates the
-	// subscription. Re-registering the same url and event type is idempotent and
-	// deliberately does NOT hand the secret back: this endpoint is unauthenticated,
-	// so otherwise anyone who could guess a subscriber's URL would be given its
-	// signing key and could forge deliveries directly to that subscriber.
+	// The secret is returned only on the call that creates the subscription. This
+	// endpoint is unauthenticated, so returning it on re-registration would hand
+	// a subscriber's signing key to anyone who can guess its URL.
 	if !created {
 		sub.Secret = ""
 		writeJSON(w, http.StatusOK, sub)
@@ -142,9 +135,8 @@ func (s *Server) getEvent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"event": ev, "delivery_attempts": attempts})
 }
 
-// health is the ALB target check. It touches the database on purpose: an api
-// task that cannot persist cannot honour a 202, so it should be pulled out of
-// the target group rather than accept traffic it will 500.
+// health is the ALB target check and touches the database, because a task that
+// cannot persist cannot honour a 202.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -158,7 +150,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
-			next.ServeHTTP(w, r) // the ALB polls this every few seconds
+			next.ServeHTTP(w, r) // polled by the ALB every 15s
 			return
 		}
 		start := time.Now()

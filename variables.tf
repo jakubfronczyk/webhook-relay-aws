@@ -81,8 +81,7 @@ variable "aws_session_token" {
   sensitive   = true
 }
 
-# Messaging
-# These two must stay in step with elasticmq.conf, which is what the local demo runs against.
+# Messaging. Must stay in step with elasticmq.conf, which the local demo runs against.
 variable "queue_visibility_timeout_seconds" {
   description = "How long a received message stays hidden. Must exceed worst-case delivery time."
   type        = number
@@ -102,10 +101,8 @@ variable "db_instance_class" {
   default     = "db.t3.micro"
 }
 
-# Ports. Declared once here and passed to every module that needs them: the security group
-# rules, the load balancer target group, the container port, and the database. Left as
-# per-module defaults they drift, and the failure is a service nothing can reach with no
-# plan-time error.
+# Ports, declared once and passed to every module that uses them. As per-module defaults they
+# drift, and a mismatch produces a service nothing can reach with no plan-time error.
 variable "api_port" {
   description = "Port the api container listens on, and the ALB target group port"
   type        = number

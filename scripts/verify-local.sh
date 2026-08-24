@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# Asserts every delivery guarantee this repo claims, from a cold start, with no
-# AWS account. Exits non-zero when one stops holding.
+# Asserts every delivery guarantee from a cold start, with no AWS account.
 #
-#   ./scripts/verify-local.sh              wipe, rebuild, run everything (~3 min)
+#   ./scripts/verify-local.sh                      wipe, rebuild, run everything (~3 min)
 #   KEEP_STACK=1 N=100 ./scripts/verify-local.sh   reuse the running stack
 #
 set -uo pipefail
@@ -36,9 +35,8 @@ until_()    { local t=$((SECONDS+$1)); shift
 
 got()     { [ "$(attempts "$1" | jq 'length')" -ge "$2" ]; }
 in_dlq()  { [ "$(attr webhook-relay-deliveries-dlq ApproximateNumberOfMessages)" = "$1" ]; }
-# "Empty" and "finished" are different questions: a message a dead worker is
-# still holding is invisible, not lost, until its visibility timeout expires.
-# Polling on the visible count alone samples mid-recovery and invents data loss.
+# A message a dead worker holds is invisible until its visibility timeout expires,
+# so polling the visible count alone samples mid-recovery and invents data loss.
 drained() { [ "$(attr webhook-relay-deliveries ApproximateNumberOfMessages)" = "0" ] &&
             [ "$(attr webhook-relay-deliveries ApproximateNumberOfMessagesNotVisible)" = "0" ]; }
 
@@ -62,17 +60,15 @@ is "POST /subscriptions rejects a relative url" \
 is "re-registering the same url and event type is idempotent" \
    "$(subscribe "idem.$RUN" | jq -r .id)" "$(subscribe "idem.$RUN" | jq -r .id)"
 
-# The endpoint is unauthenticated, so handing the secret back on re-registration
-# would give anyone who can guess a subscriber's URL its signing key.
+# The endpoint is unauthenticated, so returning the secret on re-registration would
+# hand a subscriber's signing key to anyone who can guess its URL.
 is "creating a subscription returns its signing secret" \
    "$(subscribe "secret.$RUN" | jq -r 'if (.secret // "") == "" then "absent" else "present" end')" "present"
 is "re-registering does NOT return the secret" \
    "$(subscribe "secret.$RUN" | jq -r 'if (.secret // "") == "" then "absent" else "present" end')" "absent"
 
-# Scheme policy. Compose sets ALLOW_INSECURE_SUBSCRIBERS because the fake
-# subscriber speaks http; AWS leaves it unset, where worker egress is :443 only.
-# Only the always-true half is asserted here — a check that cannot fail is worse
-# than no check.
+# Compose sets ALLOW_INSECURE_SUBSCRIBERS, so only the scheme rejection that holds
+# in both environments is asserted here.
 is "a url with an unsupported scheme is rejected" \
    "$(code -X POST "$API/subscriptions" -H 'content-type: application/json' \
       -d '{"url":"ftp://x.test/hook","event_type":"y"}')" "400"
@@ -127,8 +123,7 @@ docker compose stop worker >/dev/null 2>&1
 echo "  enqueueing $N events with no worker running…"
 seq 1 $N | xargs -P 16 -I_ curl -s -o /dev/null -X POST "$API/events" \
   -H 'content-type: application/json' -d "{\"type\":\"kill.$RUN\",\"payload\":{}}"
-# ApproximateNumberOfMessages is approximate by contract; exact accounting comes
-# from Postgres, the only component that can answer a transactional question.
+# ApproximateNumberOfMessages is approximate by contract; exact accounting comes from Postgres.
 btwn "the backlog survives with nothing consuming it" \
   "$(attr webhook-relay-deliveries ApproximateNumberOfMessages)" $((N-5)) $N
 docker compose start worker >/dev/null 2>&1; sleep 3
@@ -148,8 +143,7 @@ stats=$(curl -sf "$SINK/stats")
 is "the api accepted all $N" "$accepted" "$N"
 is "every accepted event reached the subscriber" "$delivered" "$accepted"
 is "the subscriber's own tally agrees" "$(jq -r .unique_events <<<"$stats")" "$N"
-# Duplicates are expected and bounded: the deliveries in flight when the process
-# died, accepted by the subscriber but never acked to SQS.
+# Duplicates are bounded by the deliveries in flight when the process died.
 btwn "duplicates stayed within WORKER_CONCURRENCY ($(jq -r .duplicate_recv <<<"$stats"))" \
   "$(jq -r .duplicate_recv <<<"$stats")" 0 "$(docker compose exec -T worker printenv WORKER_CONCURRENCY 2>/dev/null || echo 8)"
 

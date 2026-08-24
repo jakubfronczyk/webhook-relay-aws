@@ -15,8 +15,7 @@ fmt:
 validate:
     terraform validate
 
-# Counts rule arguments, never lines of text, so a comment cannot inflate a
-# number.
+# Counts rule arguments, not lines, so a comment cannot inflate the number.
 
 # Reproducible evidence for the README's network-policy claims
 audit:
@@ -35,17 +34,15 @@ audit:
          END { for (k in count) printf "  %-18s %s\n", k, count[k] }' \
          modules/security/main.tf | sort
 
-# ---------------------------------------------------------------------------
-# The app, locally. No AWS account, no credentials, no cost.
-# Postgres stands in for RDS, ElasticMQ for SQS. Same code, same env vars.
-# ---------------------------------------------------------------------------
+# --- local ----------------------------------------------------------------
+# Postgres stands in for RDS, ElasticMQ for SQS. No AWS account required.
 
 # Unit tests: the retry curve and the HMAC scheme
 test:
     cd app && go test ./...
 
-# Exits non-zero when a guarantee breaks. ~3 min, most of it waiting out real
-# backoff and visibility timeouts. KEEP_STACK=1 reuses the running stack.
+# ~3 min, most of it waiting out real backoff and visibility timeouts.
+# KEEP_STACK=1 reuses the running stack.
 
 # Assert every delivery guarantee from a cold start
 verify:
@@ -82,23 +79,18 @@ demo:
     curl -sf "localhost:8080/events/$id" | jq .
     curl -sf localhost:9000/stats | jq .
 
-# ---------------------------------------------------------------------------
-# AWS. Everything here bills. `just down` after every session is the guardrail;
-# the Budgets alarm is a lagging notification with an 8-12 hour delay, not
-# protection.
-# ---------------------------------------------------------------------------
+# --- aws ------------------------------------------------------------------
+# Everything here bills. `just down` after every session is the guardrail; the
+# Budgets alarm lags by 8-12 hours and is a notification, not protection.
 
 # The short commit, with -dirty appended when the tree has uncommitted changes.
-# Immutable per build, and that is the point — see `deploy`.
 
 # Image tag for the current working tree
 version:
     @git describe --always --dirty --abbrev=8
 
-# The tag has to change for a deploy to happen at all. A task definition that is
-# byte-identical produces no Terraform diff, so ECS is never told to do anything
-# and the service keeps running the old image. Tagging everything `latest` and
-# re-applying looks like a deploy and is a no-op.
+# The tag has to change for a deploy to happen: a byte-identical task definition
+# produces no diff, so ECS is never told to roll.
 
 # Apply, pinning both services to the image built from this working tree
 deploy:
@@ -108,13 +100,9 @@ deploy:
 down:
     terraform destroy
 
-# Terraform cannot build images, so this is a recipe rather than a resource.
-#
-# Built natively for ARM64. Fargate defaults to x86_64, and an arm64 image
-# deployed onto that fails at task start with "exec format error" — the most
-# common first-deploy failure in this shape of project. The task definitions set
-# runtime_platform ARM64 to match, and ARM64 Fargate is also about 20% cheaper.
-# Each image gets both an immutable tag and `latest`; `deploy` uses the former.
+# Terraform cannot build images. Built natively for ARM64, matching
+# runtime_platform in the task definitions; each image gets an immutable tag and
+# `latest`, and `deploy` uses the former.
 
 # Build both service images for ARM64 and push them to ECR
 push:

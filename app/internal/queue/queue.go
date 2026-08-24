@@ -1,11 +1,5 @@
-// Package queue wraps the one SQS queue this system has.
-//
-// There is a single SQS client implementation for both environments. ElasticMQ
-// speaks the SQS wire protocol, so the only thing that changes between a laptop
-// and Fargate is the endpoint URL. That is the whole reason Phase 2 does not use
-// a Go channel: a channel has no visibility timeout, no receive count, and no
-// dead-letter queue, so a local demo built on one would exercise a code path
-// that does not exist in AWS.
+// Package queue wraps the delivery queue. ElasticMQ speaks the SQS wire
+// protocol, so only the endpoint URL differs between a laptop and Fargate.
 package queue
 
 import (
@@ -21,17 +15,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-// Delivery is the message body. It carries ids only, never the payload:
-// the event is already durable in Postgres, and a 256KB SQS body limit is not
-// a limit worth inheriting.
+// Delivery is the message body. It carries ids only; the event itself is
+// already durable in Postgres.
 type Delivery struct {
 	EventID   string `json:"event_id"`
 	EventType string `json:"event_type"`
 }
 
-// Message is a received Delivery plus the two pieces of SQS bookkeeping the
-// worker needs: the handle to ack with, and how many times this message has
-// been received. The receive count is what the backoff curve is derived from.
+// Message is a received Delivery plus the receipt handle to ack with and the
+// receive count the backoff curve is derived from.
 type Message struct {
 	Delivery
 	ReceiptHandle string
@@ -50,8 +42,7 @@ func Open(ctx context.Context, region, endpoint, queueURL string) (*Queue, error
 
 	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(region)}
 	if endpoint != "" {
-		// ElasticMQ authenticates nothing but the SDK refuses to sign without
-		// credentials, so supply throwaway ones rather than a no-op signer.
+		// ElasticMQ verifies nothing, but the SDK refuses to sign without credentials.
 		opts = append(opts, awsconfig.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider("local", "local", "")))
 	}
@@ -69,10 +60,8 @@ func Open(ctx context.Context, region, endpoint, queueURL string) (*Queue, error
 	return &Queue{client: client, url: queueURL}, nil
 }
 
-// Send is the api's only queue operation, and it happens after the INSERT.
-// Order matters: an event in the queue but not in the database is a message the
-// worker cannot resolve, while an event in the database but not in the queue is
-// a row a human can requeue.
+// Send is called after the event row exists; a message referencing a missing
+// event is unresolvable by any retry.
 func (q *Queue) Send(ctx context.Context, d Delivery) error {
 	body, err := json.Marshal(d)
 	if err != nil {
@@ -85,9 +74,8 @@ func (q *Queue) Send(ctx context.Context, d Delivery) error {
 	return err
 }
 
-// Receive long-polls. Long polling is not a tuning knob here: with short polls
-// an idle fleet bills a request per task per few milliseconds, and the backlog
-// metric the worker autoscales on gets noisier for no benefit.
+// Receive long-polls; short polling bills a request per task every few
+// milliseconds on an idle fleet.
 func (q *Queue) Receive(ctx context.Context, batch, waitSeconds int32) ([]Message, error) {
 	out, err := q.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(q.url),
@@ -105,8 +93,7 @@ func (q *Queue) Receive(ctx context.Context, batch, waitSeconds int32) ([]Messag
 	for _, m := range out.Messages {
 		var d Delivery
 		if err := json.Unmarshal([]byte(aws.ToString(m.Body)), &d); err != nil {
-			// Unparseable body: nothing a retry fixes. Let maxReceiveCount
-			// carry it to the DLQ rather than deleting evidence.
+			// Unparseable, and no retry fixes it; maxReceiveCount carries it to the DLQ.
 			continue
 		}
 		msgs = append(msgs, Message{
@@ -118,10 +105,8 @@ func (q *Queue) Receive(ctx context.Context, batch, waitSeconds int32) ([]Messag
 	return msgs, nil
 }
 
-// Delete is the ack. It runs only after every subscriber for the event has been
-// dealt with, which is what makes the pipeline at-least-once: a worker killed
-// between the POST and this call means the message reappears and is delivered
-// again, never that it is lost.
+// Delete acks the message, and runs only once every subscriber has been dealt
+// with. A worker killed before this call causes redelivery, never loss.
 func (q *Queue) Delete(ctx context.Context, receiptHandle string) error {
 	_, err := q.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(q.url),
@@ -130,9 +115,8 @@ func (q *Queue) Delete(ctx context.Context, receiptHandle string) error {
 	return err
 }
 
-// Retry hands the message back early with a new visibility timeout. This is the
-// backoff curve: SQS has no exponential retry setting, only one fixed
-// visibility timeout, so the growing interval is ours to apply per message.
+// Retry sets a new visibility timeout on this receipt. SQS has no exponential
+// backoff setting, so the growing interval is applied per message here.
 func (q *Queue) Retry(ctx context.Context, receiptHandle string, after time.Duration) error {
 	_, err := q.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(q.url),

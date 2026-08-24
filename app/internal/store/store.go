@@ -1,7 +1,5 @@
-// Package store is the only place that talks to Postgres.
-//
-// Ids are Go strings cast to uuid in SQL rather than a uuid Go type. It keeps
-// the pgx type map out of the picture and every query readable.
+// Package store is the only place that talks to Postgres. Ids are Go strings
+// cast to uuid in SQL, which keeps the pgx type map out of every query.
 package store
 
 import (
@@ -54,21 +52,16 @@ type Attempt struct {
 	AttemptedAt    time.Time `json:"attempted_at"`
 }
 
-// Open dials Postgres and waits for it to answer. Both binaries start at the
-// same time as the database under docker compose, so the retry loop is not
-// optional; on Fargate it covers an RDS failover just as well.
+// Open dials Postgres and retries for up to 60s, which covers both a cold
+// compose stack and an RDS failover.
 func Open(ctx context.Context, url string, maxConns int32) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
 
-	// pgxpool defaults to max(4, NumCPU), which on a 2-vCPU Fargate task is four
-	// connections against eight delivery goroutines. Acquisition then blocks, and
-	// that wait is charged to the message's visibility timeout. Worse, the
-	// detached 5s context in RecordAttempt can expire while queueing, losing the
-	// record of a delivery that actually happened and causing a duplicate POST on
-	// the next receive.
+	// pgxpool defaults to max(4, NumCPU), below WORKER_CONCURRENCY on a 2-vCPU
+	// task; acquisition would then block against the message's visibility timeout.
 	if maxConns > 0 {
 		cfg.MaxConns = maxConns
 	}
@@ -98,8 +91,7 @@ func Open(ctx context.Context, url string, maxConns int32) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
-// Migrate applies every embedded .sql file in name order. Statements are
-// idempotent, so concurrent tasks racing here is safe.
+// Migrate applies every embedded .sql file in name order. Statements are idempotent.
 func (s *Store) Migrate(ctx context.Context) error {
 	names, err := fs.Glob(migrations.FS, "*.sql")
 	if err != nil {
@@ -119,7 +111,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 }
 
 // CreateSubscription registers a subscription, returning whether it was newly
-// created. A false means the caller re-registered an existing one.
+// created rather than an existing one re-registered.
 func (s *Store) CreateSubscription(ctx context.Context, url, eventType string) (Subscription, bool, error) {
 	var created bool
 	sub := Subscription{
@@ -129,16 +121,9 @@ func (s *Store) CreateSubscription(ctx context.Context, url, eventType string) (
 		Secret:    newSecret(),
 		Active:    true,
 	}
-	// Idempotent on (url, event_type): a repeated registration reactivates the
-	// existing subscription rather than creating a second one that would double
-	// every delivery. DO UPDATE rather than DO NOTHING, because DO NOTHING
-	// returns no row to RETURNING.
-	//
-	// xmax is zero only on a freshly inserted row, so it distinguishes a create
-	// from a conflict without a second query. The caller needs that distinction
-	// because the secret must never be returned on the conflict path: anyone who
-	// can guess a subscriber's URL would otherwise be handed its signing key and
-	// could forge deliveries straight to that subscriber.
+	// DO UPDATE rather than DO NOTHING, which returns no row to RETURNING.
+	// xmax is zero only on a freshly inserted row, so it separates a create from
+	// a conflict without a second query.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO subscriptions (id, url, event_type, secret)
 		 VALUES ($1::uuid, $2, $3, $4)
@@ -171,8 +156,7 @@ func (s *Store) Event(ctx context.Context, id string) (Event, error) {
 }
 
 // SubscriptionsFor returns the live subscribers for an event type. The worker
-// calls this, not the api: a subscriber added after an event was accepted but
-// before it was delivered should still receive it.
+// calls it at delivery time, so a subscriber registered after the event still receives it.
 func (s *Store) SubscriptionsFor(ctx context.Context, eventType string) ([]Subscription, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id::text, url, event_type, secret, active, created_at
@@ -193,10 +177,7 @@ func (s *Store) SubscriptionsFor(ctx context.Context, eventType string) ([]Subsc
 	return out, rows.Err()
 }
 
-// Delivered reports which subscriptions have already returned 2xx for this
-// event. SQS redelivers the whole message, so without this a retry caused by
-// subscriber B would re-POST to subscriber A. At-least-once is the contract;
-// duplicates we can cheaply avoid, we avoid.
+// Delivered reports which subscriptions have already returned 2xx for this event.
 func (s *Store) Delivered(ctx context.Context, eventID string) (map[string]bool, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT subscription_id::text FROM delivery_attempts
@@ -246,14 +227,13 @@ func (s *Store) Attempts(ctx context.Context, eventID string) ([]Attempt, error)
 	return attempts, rows.Err()
 }
 
-// Ping backs GET /healthz. The ALB health check failing when the database is
-// unreachable is deliberate: an api task that cannot persist cannot honour a 202.
+// Ping backs GET /healthz, so a task that cannot persist leaves the target group.
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
 func newSecret() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
-		panic(err) // crypto/rand failing is not a recoverable condition
+		panic(err) // crypto/rand failure is not recoverable
 	}
 	return "whsec_" + hex.EncodeToString(b)
 }

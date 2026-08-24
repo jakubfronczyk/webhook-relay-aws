@@ -1,10 +1,6 @@
-// Package sign implements the signature a subscriber uses to prove a delivery
-// came from us.
-//
-// The scheme is the one Stripe and GitHub use: HMAC-SHA256 over
-// "<timestamp>.<body>" with a per-subscription secret. The timestamp is inside
-// the signed string, not just alongside it, so a captured delivery cannot be
-// replayed later with a fresh timestamp header.
+// Package sign implements HMAC-SHA256 over "<timestamp>.<body>" with a
+// per-subscription secret. The timestamp is inside the signed string, so a
+// captured delivery cannot be replayed with a fresh timestamp header.
 package sign
 
 import (
@@ -38,12 +34,11 @@ func Compute(secret string, ts time.Time, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-// Verify is the receiver's half. It lives here so the compose sink can import
-// the same code the sender uses, which is the only way the local demo proves
-// the signature is actually correct rather than merely present.
+// Verify is the receiver's half, exported so the compose sink checks signatures
+// with the same code that produced them.
 func Verify(secret, signature string, ts time.Time, body []byte, tolerance time.Duration) error {
 	want := Compute(secret, ts, body)
-	// Constant-time: a byte-by-byte compare leaks the correct prefix length.
+	// Constant-time; a byte-by-byte compare leaks the correct prefix length.
 	if !hmac.Equal([]byte(signature), []byte(want)) {
 		return fmt.Errorf("signature mismatch")
 	}

@@ -1,10 +1,5 @@
-# The whole system on a laptop, no AWS account and no credentials.
-#
-#   docker compose up --build
-#   just demo
-#
-# Postgres and ElasticMQ stand in for RDS and SQS. Everything else is the same
-# code and the same configuration surface that runs on Fargate.
+# The whole system on a laptop, with no AWS account. Postgres and ElasticMQ stand
+# in for RDS and SQS; the application code and its configuration are unchanged.
 
 name: webhook-relay
 
@@ -46,8 +41,7 @@ services:
       QUEUE_URL: http://elasticmq:9324/000000000000/webhook-relay-deliveries
       AWS_REGION: us-east-1
       LISTEN_ADDR: ":8080"
-      # The fake subscriber speaks http. In AWS this stays unset: worker egress is
-      # :443 only, so an http subscriber would time out on every attempt.
+      # The fake subscriber speaks http. Unset in AWS, where worker egress is :443 only.
       ALLOW_INSECURE_SUBSCRIBERS: "true"
     ports:
       - "8080:8080"
@@ -72,8 +66,7 @@ services:
       AWS_ENDPOINT_URL_SQS: http://elasticmq:9324
       QUEUE_URL: http://elasticmq:9324/000000000000/webhook-relay-deliveries
       AWS_REGION: us-east-1
-      # Compressed retry curve so the demo finishes in a minute instead of ten.
-      # AWS keeps the 30s default; this is the only behavioural difference.
+      # Compressed retry curve, and the only behavioural difference from AWS.
       BACKOFF_BASE: 2s
       BACKOFF_MAX: 30s
       POLL_WAIT_SECONDS: "5"
@@ -86,8 +79,7 @@ services:
       elasticmq:
         condition: service_healthy
 
-  # Not part of the system. A fake subscriber that counts what it receives, so
-  # "zero events lost" reconciles against delivery_attempts.
+  # A fake subscriber that counts what it receives. Not part of the system.
   sink:
     build:
       context: ./app
@@ -95,14 +87,11 @@ services:
         BINARY: sink
     environment:
       LISTEN_ADDR: ":9000"
-      # Raise to N and the sink rejects every delivery whose attempt number is
-      # <= N, which is how the retry-and-DLQ proof is produced on demand.
+      # Rejects every delivery at or below this attempt number.
       FAIL_UNTIL_ATTEMPT: "${FAIL_UNTIL_ATTEMPT:-0}"
-      # Set to a subscription's secret and the sink verifies the HMAC with the
-      # same code that produced it, which is what turns "signed" into a proof.
+      # Set to a subscription's secret to make the sink verify the HMAC.
       SUBSCRIPTION_SECRET: "${SUBSCRIPTION_SECRET:-}"
-      # Simulates a slow subscriber, so there is a drain long enough to
-      # interrupt when proving nothing is lost when the fleet dies.
+      # Simulates a slow subscriber, so a drain lasts long enough to interrupt.
       RESPONSE_DELAY: "${RESPONSE_DELAY:-0s}"
     ports:
       - "9000:9000"

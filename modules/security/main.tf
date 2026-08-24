@@ -1,13 +1,9 @@
-# Four security groups and their rules.
+# Four security groups and their rules. Every rule is a separate resource rather than an
+# inline block: the chain needs alb-sg and api-sg to reference each other, which is a cycle
+# Terraform refuses to plan. Rule resources point into groups, so no group references another.
 #
-# The groups deliberately hold no inline ingress/egress blocks. Every rule is a separate
-# aws_vpc_security_group_{ingress,egress}_rule resource, because the chain requires the ALB
-# group to reference the api group and the api group to reference the ALB group. Expressed
-# as inline blocks that is a cycle in the dependency graph and Terraform refuses to plan.
-# Rule resources point into the groups instead, so no group ever references another.
-#
-# Terraform removes the allow-all egress rule AWS attaches to every new group. Egress here
-# is therefore only what is written below, and rds has none at all.
+# Terraform removes the allow-all egress AWS attaches to a new group, so egress is only what
+# is written below and rds-sg has none.
 
 resource "aws_security_group" "alb" {
   name        = "${var.project_name}-alb-sg"

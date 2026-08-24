@@ -1,8 +1,5 @@
-// Package config reads process configuration from the environment.
-//
-// One rule: every value the api and worker need has a default that works under
-// docker compose, and the AWS task definitions override the ones that differ.
-// A missing DATABASE_URL is fatal; nothing else is.
+// Package config reads process configuration from the environment. Every value
+// defaults to something that works under docker compose.
 package config
 
 import (
@@ -23,14 +20,13 @@ type Config struct {
 
 	// api
 	ListenAddr string
-	// AllowInsecureSubscribers permits http:// subscriber URLs. Compose sets it;
-	// AWS does not, because worker egress is :443 only.
+	// AllowInsecureSubscribers permits http:// subscriber URLs. Compose sets it; AWS does not.
 	AllowInsecureSubscribers bool
 
 	// worker
 	Concurrency     int
-	BackoffBase     time.Duration // first retry delay; doubles per receive
-	BackoffMax      time.Duration // ceiling, and must stay under the queue's own max
+	BackoffBase     time.Duration // first retry delay, doubling per receive
+	BackoffMax      time.Duration // ceiling on that delay
 	DeliveryTimeout time.Duration
 	PollWaitTime    int32 // SQS long-poll seconds, 20 is the maximum
 	BatchSize       int32
@@ -49,17 +45,12 @@ func Load() (Config, error) {
 		BackoffMax:               envDuration("BACKOFF_MAX", 15*time.Minute),
 		DeliveryTimeout:          envDuration("DELIVERY_TIMEOUT", 5*time.Second),
 		PollWaitTime:             int32(envInt("POLL_WAIT_SECONDS", 20)),
-		// Must not exceed WORKER_CONCURRENCY. A message received beyond the
-		// concurrency limit sits in the local slice waiting for a semaphore slot
-		// while its visibility timeout is already running.
+		// Must not exceed WORKER_CONCURRENCY; a message received beyond it waits
+		// for a slot with its visibility timeout already running.
 		BatchSize: int32(envInt("POLL_BATCH_SIZE", 8)),
 	}
-	// On Fargate there is no DATABASE_URL to hand over. RDS owns the master
-	// password and stores it as a JSON document in Secrets Manager, and the ECS
-	// task definition injects one key of it as DB_PASSWORD. The remaining parts
-	// are plain Terraform outputs, so the DSN is assembled here rather than
-	// interpolated into the task definition, which would put the password in the
-	// ECS console and in CloudWatch on every task start.
+	// On Fargate the password arrives on its own as DB_PASSWORD, injected from
+	// Secrets Manager, so the DSN is assembled here rather than in the task definition.
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = databaseURLFromParts()
 	}
@@ -70,8 +61,7 @@ func Load() (Config, error) {
 }
 
 // databaseURLFromParts builds a DSN from discrete variables, returning "" when
-// the required ones are absent. url.UserPassword handles escaping, which matters
-// because an RDS-generated password contains punctuation that is not URL-safe.
+// DB_HOST or DB_PASSWORD is absent. RDS passwords contain characters needing escape.
 func databaseURLFromParts() string {
 	host, password := env("DB_HOST", ""), env("DB_PASSWORD", "")
 	if host == "" || password == "" {
@@ -84,9 +74,8 @@ func databaseURLFromParts() string {
 		Path:   "/" + env("DB_NAME", "relay"),
 	}
 	q := u.Query()
-	// RDS presents a certificate signed by the Amazon RDS CA. require verifies
-	// the connection is encrypted without verifying that chain; verify-full needs
-	// the CA bundle in the image and is the production setting.
+	// require encrypts without verifying the chain; verify-full needs the RDS CA
+	// bundle in the image.
 	q.Set("sslmode", "require")
 	u.RawQuery = q.Encode()
 	return u.String()

@@ -1,13 +1,8 @@
-# A spend ceiling for the whole account.
+# A spend ceiling for the whole account. Budgets evaluates on an 8 to 12 hour delay, so this
+# is a notification and `just down` is the guardrail.
 #
-# This is a notification, not a guardrail. AWS Budgets evaluates on a delay of roughly 8 to
-# 12 hours, so it reports a runaway the next morning rather than preventing one. The actual
-# protection is `just down` at the end of every session.
-#
-# Account-wide on purpose, with no cost_filter. A filter scoped to the project tag would
-# require activating that tag as a cost allocation tag in the Billing console, which is a
-# manual step with a 24 hour delay, and it would then miss any untagged resource. For a
-# personal account the whole-account ceiling is both simpler and safer.
+# No cost_filter: scoping to the project tag needs that tag activated for cost allocation, a
+# manual step with a 24 hour delay, and would miss untagged resources.
 
 resource "aws_budgets_budget" "monthly" {
   name = "${var.project_name}-monthly"
@@ -17,7 +12,7 @@ resource "aws_budgets_budget" "monthly" {
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
 
-  # Alert once this much has actually been spent. Catches a slow leak.
+  # Alerts on money already spent.
   notification {
     comparison_operator        = "GREATER_THAN"
     threshold                  = var.actual_alert_threshold_percent
@@ -26,8 +21,8 @@ resource "aws_budgets_budget" "monthly" {
     subscriber_email_addresses = var.alert_emails
   }
 
-  # Alert when the month is projected to exceed the ceiling. Catches a NAT gateway left
-  # running on day three, before the money is gone.
+  # Alerts on the projected month total. Needs about five weeks of account history before
+  # AWS will produce a forecast at all.
   notification {
     comparison_operator        = "GREATER_THAN"
     threshold                  = 100

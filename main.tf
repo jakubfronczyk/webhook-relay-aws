@@ -113,8 +113,6 @@ module "ecs" {
   api_port           = var.api_port
   worker_concurrency = var.worker_concurrency
 
-  # The api service registers targets with the load balancer, and the listener has to exist
-  # before that registration is accepted. Nothing in the arguments above expresses that, so
-  # it is stated here rather than left to chance.
+  # The listener must exist before the api service can register targets.
   depends_on = [module.alb]
 }

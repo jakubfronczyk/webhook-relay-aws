@@ -1,26 +1,19 @@
-# Two ECR repositories, one per service image.
-#
-# Terraform cannot build or push images, so this module creates the destinations and the
-# justfile owns everything after that. The repositories exist in Terraform rather than being
-# created by hand because the ECS task definitions reference their URLs, and a hand-made
-# repository is one more thing that has to be recreated correctly in an empty account.
+# Two ECR repositories, one per service image. Terraform cannot build or push, so this module
+# creates the destinations and `just push` does the rest.
 
 resource "aws_ecr_repository" "service" {
   for_each = toset(var.services)
 
   name = "${var.project_name}/${each.key}"
 
-  # Without this, terraform destroy fails on any repository that still holds an image, and
-  # teardown is the actual cost guardrail for this project. The production setting is false.
+  # terraform destroy fails on a repository holding images. Production: false.
   force_delete = true
 
-  # MUTABLE so `latest` can be re-pointed by a rebuild. IMMUTABLE is the better production
-  # answer, because it makes a deployed digest impossible to change underneath you, and it
-  # requires a real image tagging scheme to go with it.
+  # MUTABLE so `latest` can be re-pointed. Production: IMMUTABLE, with a real tagging scheme.
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
-    # Basic scanning is free. It reports CVEs in the image on push and costs nothing to leave on.
+    # Basic scanning is free.
     scan_on_push = true
   }
 
@@ -29,9 +22,7 @@ resource "aws_ecr_repository" "service" {
   }
 }
 
-# Storage is billed per GB-month. Ten images is enough to roll back through a few deploys and
-# small enough that the bill never appears. Without a lifecycle policy, every build ever
-# pushed is retained forever.
+# Storage is billed per GB-month, and without a lifecycle policy every build is kept forever.
 resource "aws_ecr_lifecycle_policy" "expire_old_images" {
   for_each = aws_ecr_repository.service
 

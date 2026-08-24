@@ -1,24 +1,15 @@
-# The cluster, both services, and the three IAM roles they need.
+# The cluster, both services, and three IAM roles. Two explicit service blocks rather than a
+# reusable submodule, since the services differ in IAM, scaling signal and load balancer.
 #
-# One module with two explicit service blocks rather than a reusable ecs-service submodule.
-# The two services differ in scaling signal, IAM permissions, and load balancer attachment,
-# one of them having none at all, so a submodule would be mostly conditionals. This reads
-# top to bottom.
-#
-# Three roles, not two, and the distinction is the most commonly muddled thing in ECS:
-#
-#   execution role  is used by the ECS agent, BEFORE the container starts. It pulls the
-#                   image and resolves secrets. Shared by both services because both do
-#                   exactly the same two things.
-#   task role       is assumed by the process INSIDE the container. This is where
-#                   sqs:SendMessage lives, and it is different for each service, which is
-#                   the whole point of running them separately.
+# The execution role is used by the ECS agent before the container starts, to pull the image
+# and resolve secrets, and is shared. A task role is assumed by the process inside the
+# container and differs per service.
 
 resource "aws_ecs_cluster" "main" {
   name = var.project_name
 
   setting {
-    # Per-service CloudWatch metrics. Free; the paid tier is Container Insights.
+    # Container Insights is billed per task.
     name  = "containerInsights"
     value = "disabled"
   }
@@ -32,9 +23,8 @@ resource "aws_ecs_cluster" "main" {
 # Logs
 # ---------------------------------------------------------------------------
 
-# Without an explicit group the awslogs driver fails to create one and the task dies at
-# startup with no log to explain why, because the thing that would have logged it is the
-# logging. Retention is set because "never expire" is the default and it bills forever.
+# The awslogs driver does not create the group, and a task whose logging fails at startup
+# leaves no log explaining it. Retention is set because the default is never to expire.
 resource "aws_cloudwatch_log_group" "service" {
   for_each = toset(var.services)
 
@@ -70,15 +60,14 @@ resource "aws_iam_role" "execution" {
   }
 }
 
-# The AWS-managed policy covers ECR pull and CloudWatch Logs write. Hand-writing it is a
-# common way to spend an afternoon discovering ecr:GetAuthorizationToken must be on "*".
+# Covers ECR pull and CloudWatch Logs write. Hand-writing it means discovering that
+# ecr:GetAuthorizationToken has to be granted on "*".
 resource "aws_iam_role_policy_attachment" "execution_managed" {
   role       = aws_iam_role.execution.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Reading the database password is NOT in that managed policy, and it is scoped to the one
-# secret rather than to Secrets Manager as a whole.
+# Reading the database password is not in that managed policy, and is scoped to one secret.
 data "aws_iam_policy_document" "execution_secrets" {
   statement {
     actions   = ["secretsmanager:GetSecretValue"]
@@ -108,7 +97,7 @@ resource "aws_iam_role" "task" {
   }
 }
 
-# The api only ever puts messages on the queue. It cannot read or delete one.
+# The api can only enqueue; it cannot read or delete a message.
 data "aws_iam_policy_document" "api_task" {
   statement {
     actions   = ["sqs:SendMessage"]
@@ -116,10 +105,8 @@ data "aws_iam_policy_document" "api_task" {
   }
 }
 
-# The worker only ever consumes. It cannot enqueue, so a bug in the worker cannot manufacture
-# events. ChangeMessageVisibility is what the backoff curve is made of, and its absence would
-# fail silently: retries would fall back to the queue's fixed timeout and the growing interval
-# the README documents would quietly not happen.
+# The worker can only consume, so a bug in it cannot manufacture events. Removing
+# ChangeMessageVisibility fails silently: retries fall back to the queue's fixed timeout.
 data "aws_iam_policy_document" "worker_task" {
   statement {
     actions = [
@@ -143,10 +130,8 @@ resource "aws_iam_role_policy" "task" {
   policy = each.value
 }
 
-# ECS Exec, so `aws ecs execute-command` can open a shell in a running task. This is how the
-# "nothing can reach the worker" claim gets demonstrated rather than asserted: exec into a
-# task and watch a connection to the worker time out. The permissions belong on the task
-# role, not the execution role, because the SSM agent runs inside the container.
+# ECS Exec, for `aws ecs execute-command`. The permissions belong on the task role, because
+# the SSM agent runs inside the container.
 data "aws_iam_policy_document" "exec_channel" {
   statement {
     actions = [
@@ -172,9 +157,8 @@ resource "aws_iam_role_policy" "exec_channel" {
 # ---------------------------------------------------------------------------
 
 locals {
-  # Shared by both containers. The password is absent on purpose: it arrives through the
-  # secrets block below, so it never appears in the task definition, the ECS console, or the
-  # CloudWatch event stream that records every task start.
+  # The password is absent here and arrives through the secrets block, so it never appears in
+  # the task definition, the console, or the task-start event stream.
   common_environment = [
     { name = "DB_HOST", value = var.db_host },
     { name = "DB_PORT", value = tostring(var.db_port) },
@@ -184,8 +168,7 @@ locals {
     { name = "AWS_REGION", value = var.aws_region },
   ]
 
-  # :password:: selects one key out of the JSON document RDS writes. The empty fields are the
-  # version stage and version id, and omitting them means "current".
+  # :password:: selects one key from the JSON secret; the empty fields mean the current version.
   common_secrets = [
     { name = "DB_PASSWORD", valueFrom = "${var.db_secret_arn}:password::" },
   ]
@@ -194,17 +177,15 @@ locals {
 resource "aws_ecs_task_definition" "api" {
   family                   = "${var.project_name}-api"
   requires_compatibilities = ["FARGATE"]
-  # awsvpc is the only network mode Fargate supports. Each task gets its own ENI and private
-  # IP, which is what allows a security group to be attached to a task at all.
+  # The only mode Fargate supports; each task gets its own ENI, and so its own security group.
   network_mode       = "awsvpc"
   cpu                = var.api_cpu
   memory             = var.api_memory
   execution_role_arn = aws_iam_role.execution.arn
   task_role_arn      = aws_iam_role.task["api"].arn
 
-  # Fargate defaults to X86_64. The images are built natively on an arm64 laptop, and running
-  # one on the wrong architecture fails at task start with "exec format error". ARM64 Fargate
-  # is also about 20% cheaper.
+  # Fargate defaults to X86_64; an arm64 image on it fails at task start with
+  # "exec format error". ARM64 is also about 20% cheaper.
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
@@ -256,8 +237,7 @@ resource "aws_ecs_task_definition" "worker" {
     essential = true
     image     = "${var.image_urls["worker"]}:${var.image_tag}"
 
-    # No portMappings. The worker listens on nothing, which is what lets its security group
-    # have zero ingress rules.
+    # No portMappings; the worker listens on no port.
 
     environment = concat(local.common_environment, [
       { name = "WORKER_CONCURRENCY", value = tostring(var.worker_concurrency) },
@@ -298,8 +278,7 @@ resource "aws_ecs_service" "api" {
   network_configuration {
     subnets         = var.private_subnet_ids
     security_groups = [var.api_sg_id]
-    # No public IP. The ALB is in the public subnets and reaches the task over the VPC's
-    # local route; the task reaches AWS APIs outbound through the NAT gateway.
+    # The ALB reaches the task over the VPC local route; outbound goes via the NAT gateway.
     assign_public_ip = false
   }
 
@@ -309,20 +288,16 @@ resource "aws_ecs_service" "api" {
     container_port   = var.api_port
   }
 
-  # Migrations run at startup and the first connection to a cold RDS instance is slow. Without
-  # this grace period ECS starts health checking immediately, fails the task, and replaces it
-  # forever in a loop that looks like a broken image.
+  # Covers migrations and the first connection to a cold RDS instance, which would otherwise
+  # fail health checks and loop.
   health_check_grace_period_seconds = 60
 
-  # Roll one task at a time while keeping the old one serving: 100/200 with two tasks means a
-  # new one must pass health checks before an old one is drained.
+  # A new task must pass health checks before an old one is drained.
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
-  # Without this, a revision that cannot start — a bad image, a missing permission, a failing
-  # health check — is retried forever and the service sits in a replacement loop until someone
-  # notices. The circuit breaker stops after a threshold ECS derives from the desired count,
-  # and rollback returns the service to the last revision that reached a steady state.
+  # A revision that never reaches a steady state is otherwise retried forever. Rollback
+  # returns the service to the last revision that worked.
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -348,18 +323,15 @@ resource "aws_ecs_service" "worker" {
     assign_public_ip = false
   }
 
-  # No load_balancer block and no health check grace period, because there is no health check.
-  # ECS considers a worker task healthy while its process is running, which is correct: the
-  # queue is the backpressure signal, not an endpoint.
+  # No load balancer and no health check; the queue depth is the backpressure signal.
 
-  # 0/100 rather than 100/200. A worker being briefly absent delays delivery and loses nothing,
-  # so a deploy replaces rather than doubles, and does not need spare capacity to proceed.
+  # A worker being briefly absent delays delivery and loses nothing, so a deploy replaces
+  # rather than doubles.
   deployment_minimum_healthy_percent = 0
   deployment_maximum_percent         = 100
 
-  # A worker has no health check, so "reached a steady state" means the task stayed running.
-  # That still catches the failures that matter here: an image for the wrong architecture, a
-  # missing task role, a DSN that will not connect.
+  # With no health check, a steady state means the task stayed running, which still catches a
+  # wrong-architecture image, a missing task role, or an unreachable database.
   deployment_circuit_breaker {
     enable   = true
     rollback = true

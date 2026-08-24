@@ -21,8 +21,7 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	// SIGTERM is what ECS sends before it kills the task, and it is the signal
-	// that has to be honoured for a deploy to be zero-downtime.
+	// ECS sends SIGTERM before killing a task.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -44,8 +43,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	defer st.Close()
 
-	// The api owns the schema. The worker deliberately does not migrate, so
-	// there is exactly one writer of DDL no matter how many tasks are running.
+	// The api owns the schema; the worker does not migrate.
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
@@ -75,8 +73,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
-		// Longer than the ALB deregistration delay would be pointless; shorter
-		// and in-flight POST /events requests get cut off after the 202.
+		// Matched to the ALB deregistration delay of 30s.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)

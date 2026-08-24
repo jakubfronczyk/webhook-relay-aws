@@ -1,9 +1,5 @@
-// Package relay is the delivery side: drain the queue, POST outward, retry with
-// a growing interval, record every attempt.
-//
-// Division of labour worth being able to state out loud: SQS owns durability,
-// redelivery, maxReceiveCount and the DLQ. This package owns the backoff curve
-// and the HMAC.
+// Package relay drains the queue and delivers. SQS owns durability, redelivery,
+// maxReceiveCount and the DLQ; this package owns the backoff curve and the HMAC.
 package relay
 
 import (
@@ -40,30 +36,22 @@ func New(st *store.Store, q *queue.Queue, cfg config.Config, log *slog.Logger) *
 		log:   log,
 		client: &http.Client{
 			Timeout: cfg.DeliveryTimeout,
-			// Never follow redirects. For 301, 302 and 303 the Go client rewrites
-			// POST to GET and drops the body, so a subscriber whose site redirects
-			// http to https would answer 200 to a request carrying no payload. The
-			// worker would record a successful delivery and delete the message, and
-			// the event would be lost with no trace. Returning the 3xx unfollowed
-			// makes it a failed attempt, which is the truth.
+			// For 301, 302 and 303 the Go client rewrites POST to GET and drops the
+			// body, so a followed redirect would record a success that delivered nothing.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
 				MaxIdleConnsPerHost: cfg.Concurrency,
-				// Subscribers are arbitrary third-party hosts. Keeping
-				// connections warm past a few seconds mostly holds sockets open
-				// to hosts we will not talk to again.
+				// Subscribers are arbitrary hosts, mostly not contacted twice in a row.
 				IdleConnTimeout: 30 * time.Second,
 			},
 		},
 	}
 }
 
-// Run polls until the context is cancelled. Cancellation stops new receives and
-// waits for in-flight deliveries; anything already received but unfinished is
-// simply not deleted, so SQS redelivers it. That is the mechanism behind the
-// "kill the whole fleet mid-drain and lose nothing" claim.
+// Run polls until the context is cancelled, then waits for in-flight deliveries.
+// Anything received but unfinished is left undeleted and SQS redelivers it.
 func (w *Worker) Run(ctx context.Context) error {
 	sem := make(chan struct{}, w.cfg.Concurrency)
 	var wg sync.WaitGroup
@@ -109,8 +97,7 @@ func (w *Worker) handle(ctx context.Context, m queue.Message) {
 
 	ev, err := w.store.Event(ctx, m.EventID)
 	if errors.Is(err, store.ErrNotFound) {
-		// The event row is gone, so no retry will ever resolve this message.
-		// Deleting is the only terminal state that is not a DLQ entry.
+		// No retry resolves a missing event row.
 		log.Warn("event missing, dropping message")
 		w.ack(ctx, m, log)
 		return
@@ -133,9 +120,8 @@ func (w *Worker) handle(ctx context.Context, m queue.Message) {
 		return
 	}
 
-	// Skip subscribers that already returned 2xx on an earlier receive of this
-	// same message. Without this, a retry caused by subscriber B re-POSTs to
-	// subscriber A and manufactures a duplicate SQS never asked for.
+	// SQS redelivers the whole message, so without this a retry caused by one
+	// subscriber re-POSTs to every subscriber that already succeeded.
 	delivered, err := w.store.Delivered(ctx, ev.ID)
 	if err != nil {
 		log.Error("load prior deliveries", "err", err)
@@ -172,9 +158,8 @@ func (w *Worker) handle(ctx context.Context, m queue.Message) {
 	w.ack(ctx, m, log)
 }
 
-// deliver POSTs to one subscriber and records the attempt. It returns whether
-// the subscriber accepted. Recording happens on every path, success or failure,
-// because "did it get delivered?" having an answer is a product requirement.
+// deliver POSTs to one subscriber and records the attempt on every path,
+// returning whether the subscriber accepted.
 func (w *Worker) deliver(ctx context.Context, ev store.Event, sub store.Subscription, body []byte, attemptNo int, log *slog.Logger) bool {
 	ts := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.URL, bytes.NewReader(body))
@@ -194,9 +179,7 @@ func (w *Worker) deliver(ctx context.Context, ev store.Event, sub store.Subscrip
 	elapsed := time.Since(start)
 
 	if err != nil {
-		// A timeout is indistinguishable from a slow success from here. The
-		// subscriber may well have processed it, which is exactly why the
-		// contract is at-least-once and deliveries carry an event id.
+		// A timeout is indistinguishable from a slow success, so it is retried.
 		w.record(ctx, ev.ID, sub.ID, attemptNo, nil, err, elapsed)
 		log.Warn("delivery failed", "subscription_id", sub.ID, "err", err)
 		return false
@@ -226,8 +209,7 @@ func (w *Worker) record(ctx context.Context, eventID, subID string, attemptNo in
 		msg := attemptErr.Error()
 		a.Error = &msg
 	}
-	// A cancelled parent context must not lose the record of an attempt that
-	// really happened, so the write gets its own short-lived context.
+	// Detached, so a cancelled parent cannot lose the record of an attempt that happened.
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := w.store.RecordAttempt(writeCtx, eventID, a); err != nil {
@@ -237,8 +219,7 @@ func (w *Worker) record(ctx context.Context, eventID, subID string, attemptNo in
 
 func (w *Worker) ack(ctx context.Context, m queue.Message, log *slog.Logger) {
 	if err := w.queue.Delete(ctx, m.ReceiptHandle); err != nil {
-		// Not deleting means redelivery, which the skip-already-delivered check
-		// absorbs. Failing loudly here would be worse than the duplicate work.
+		// A failed delete causes redelivery, which the already-delivered check absorbs.
 		log.Error("delete message", "err", err)
 	}
 }
@@ -252,12 +233,8 @@ func (w *Worker) retry(ctx context.Context, m queue.Message, log *slog.Logger) {
 	log.Info("retry scheduled", "in", after.String())
 }
 
-// Backoff is the retry curve. It doubles per receive off a configurable base,
-// so with the 30s default the intervals are 30s, 1m, 2m, 4m up to the ceiling.
-//
-// Deliberately un-jittered: the demo has to show measurable, predictable
-// intervals. A real fleet delivering to one flapping subscriber would add full
-// jitter here to avoid every retry landing in the same second.
+// Backoff doubles per receive off base, capped at max, so the 30s default gives
+// 30s, 1m, 2m, 4m. Un-jittered, so the intervals are measurable in the demo.
 func Backoff(receiveCount int, base, max time.Duration) time.Duration {
 	if receiveCount < 1 {
 		receiveCount = 1

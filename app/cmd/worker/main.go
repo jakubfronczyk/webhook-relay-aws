@@ -1,5 +1,5 @@
-// Command worker drains the queue and delivers. It listens on nothing, which is
-// what makes worker-sg able to have zero ingress rules.
+// Command worker drains the queue and delivers. It listens on no port, which is
+// what lets worker-sg have zero ingress rules.
 package main
 
 import (
@@ -33,8 +33,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	// One connection per delivery goroutine, plus headroom for the detached
-	// attempt writes.
+	// One connection per delivery goroutine, plus headroom for the detached writes.
 	st, err := store.Open(ctx, cfg.DatabaseURL, int32(cfg.Concurrency)+4)
 	if err != nil {
 		return err

@@ -1,10 +1,5 @@
-// Command sink is a fake subscriber. It exists so the local demo has somewhere
-// to deliver to, and so "zero events lost" is a number rather than a claim: it
-// counts distinct event ids received and reconciles against delivery_attempts.
-//
-// It is deliberately not part of the system. In AWS this role is filled by an
-// HTTP API plus Lambda, outside the VPC, so the delivery path really is
-// worker -> NAT -> internet -> subscriber.
+// Command sink is a fake subscriber for the local demo. It counts distinct
+// event ids received, so "zero lost" reconciles against delivery_attempts.
 package main
 
 import (
@@ -29,14 +24,11 @@ type sink struct {
 	accepted int
 	rejected int
 
-	// failUntilAttempt makes the retry demo deterministic: reject every
-	// delivery whose attempt number is below this, accept from then on.
+	// failUntilAttempt rejects every delivery at or below this attempt number.
 	failUntilAttempt int
 	// failRate is the statistical version, for the load run.
 	failRate float64
-	// delay simulates a slow subscriber. Without it the sink answers in under a
-	// millisecond, the queue drains faster than a test can interrupt it, and the
-	// kill-the-fleet-mid-drain proof has no drain to interrupt.
+	// delay simulates a slow subscriber, so a drain lasts long enough to interrupt.
 	delay  time.Duration
 	secret string
 	log    *slog.Logger
@@ -85,8 +77,7 @@ func (s *sink) hook(w http.ResponseWriter, r *http.Request) {
 	eventID := r.Header.Get(sign.HeaderEventID)
 	attempt, _ := strconv.Atoi(r.Header.Get(sign.HeaderAttempt))
 
-	// Verifying the signature with the same code that produced it is the only
-	// way the local demo proves HMAC signing works rather than merely happens.
+	// Verified with the same code that produced the signature.
 	if s.secret != "" {
 		ts, _ := strconv.ParseInt(r.Header.Get(sign.HeaderTimestamp), 10, 64)
 		if err := sign.Verify(s.secret, r.Header.Get(sign.HeaderSignature),
@@ -109,8 +100,7 @@ func (s *sink) hook(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if fail {
-		// 500, not 4xx: a 4xx would be a permanent rejection, and this sink is
-		// simulating a subscriber that is temporarily broken.
+		// 500, not 4xx, which would signal a permanent rejection.
 		http.Error(w, "simulated subscriber failure", http.StatusInternalServerError)
 		return
 	}
@@ -118,7 +108,7 @@ func (s *sink) hook(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "ok")
 }
 
-// stats is what "zero lost" is measured against.
+// stats is what "zero lost" is reconciled against.
 func (s *sink) stats(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	duplicates := 0
