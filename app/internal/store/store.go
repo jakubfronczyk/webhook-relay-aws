@@ -57,11 +57,22 @@ type Attempt struct {
 // Open dials Postgres and waits for it to answer. Both binaries start at the
 // same time as the database under docker compose, so the retry loop is not
 // optional; on Fargate it covers an RDS failover just as well.
-func Open(ctx context.Context, url string) (*Store, error) {
+func Open(ctx context.Context, url string, maxConns int32) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
 	}
+
+	// pgxpool defaults to max(4, NumCPU), which on a 2-vCPU Fargate task is four
+	// connections against eight delivery goroutines. Acquisition then blocks, and
+	// that wait is charged to the message's visibility timeout. Worse, the
+	// detached 5s context in RecordAttempt can expire while queueing, losing the
+	// record of a delivery that actually happened and causing a duplicate POST on
+	// the next receive.
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
@@ -107,7 +118,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) CreateSubscription(ctx context.Context, url, eventType string) (Subscription, error) {
+// CreateSubscription registers a subscription, returning whether it was newly
+// created. A false means the caller re-registered an existing one.
+func (s *Store) CreateSubscription(ctx context.Context, url, eventType string) (Subscription, bool, error) {
+	var created bool
 	sub := Subscription{
 		ID:        uuid.NewString(),
 		URL:       url,
@@ -116,17 +130,23 @@ func (s *Store) CreateSubscription(ctx context.Context, url, eventType string) (
 		Active:    true,
 	}
 	// Idempotent on (url, event_type): a repeated registration reactivates the
-	// existing subscription and returns its original secret rather than
-	// creating a second one that would double every delivery. DO UPDATE rather
-	// than DO NOTHING, because DO NOTHING returns no row to RETURNING.
+	// existing subscription rather than creating a second one that would double
+	// every delivery. DO UPDATE rather than DO NOTHING, because DO NOTHING
+	// returns no row to RETURNING.
+	//
+	// xmax is zero only on a freshly inserted row, so it distinguishes a create
+	// from a conflict without a second query. The caller needs that distinction
+	// because the secret must never be returned on the conflict path: anyone who
+	// can guess a subscriber's URL would otherwise be handed its signing key and
+	// could forge deliveries straight to that subscriber.
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO subscriptions (id, url, event_type, secret)
 		 VALUES ($1::uuid, $2, $3, $4)
 		 ON CONFLICT (url, event_type) DO UPDATE SET active = true
-		 RETURNING id::text, secret, created_at`,
+		 RETURNING id::text, secret, created_at, (xmax = 0) AS created`,
 		sub.ID, sub.URL, sub.EventType, sub.Secret,
-	).Scan(&sub.ID, &sub.Secret, &sub.CreatedAt)
-	return sub, err
+	).Scan(&sub.ID, &sub.Secret, &sub.CreatedAt, &created)
+	return sub, created, err
 }
 
 func (s *Store) CreateEvent(ctx context.Context, eventType string, payload json.RawMessage) (Event, error) {

@@ -33,7 +33,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	st, err := store.Open(ctx, cfg.DatabaseURL)
+	// One connection per delivery goroutine, plus headroom for the detached
+	// attempt writes.
+	st, err := store.Open(ctx, cfg.DatabaseURL, int32(cfg.Concurrency)+4)
 	if err != nil {
 		return err
 	}

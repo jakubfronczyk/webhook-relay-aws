@@ -11,10 +11,12 @@
 resource "aws_sqs_queue" "deliveries" {
   name = "${var.project_name}-deliveries"
 
-  # Must exceed worst-case delivery time. The worker caps each POST at DELIVERY_TIMEOUT and
-  # runs WORKER_CONCURRENCY of them per task, so a message can never still be in progress
-  # when this expires. Set it too low and SQS hands the message to a second worker while the
-  # first is still POSTing, and the subscriber sees a duplicate nothing asked for.
+  # Must exceed worst-case delivery time, which is DELIVERY_TIMEOUT multiplied by the number
+  # of subscribers on one event type, because the worker delivers to them serially within a
+  # message. At 5s and this 30s ceiling that is six subscribers; past that a message can still
+  # be in progress when the timeout expires, SQS offers it to a second worker, and the
+  # subscribers already delivered to receive it again. Raise this before adding a seventh
+  # subscriber to an event type, or make delivery within a message concurrent.
   visibility_timeout_seconds = var.visibility_timeout_seconds
 
   # How long an undelivered message survives on the queue at all. Distinct from the retry

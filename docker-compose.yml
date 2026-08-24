@@ -46,6 +46,9 @@ services:
       QUEUE_URL: http://elasticmq:9324/000000000000/webhook-relay-deliveries
       AWS_REGION: us-east-1
       LISTEN_ADDR: ":8080"
+      # The fake subscriber speaks http. In AWS this stays unset: worker egress is
+      # :443 only, so an http subscriber would time out on every attempt.
+      ALLOW_INSECURE_SUBSCRIBERS: "true"
     ports:
       - "8080:8080"
     healthcheck:

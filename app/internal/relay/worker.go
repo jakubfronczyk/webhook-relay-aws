@@ -40,6 +40,15 @@ func New(st *store.Store, q *queue.Queue, cfg config.Config, log *slog.Logger) *
 		log:   log,
 		client: &http.Client{
 			Timeout: cfg.DeliveryTimeout,
+			// Never follow redirects. For 301, 302 and 303 the Go client rewrites
+			// POST to GET and drops the body, so a subscriber whose site redirects
+			// http to https would answer 200 to a request carrying no payload. The
+			// worker would record a successful delivery and delete the message, and
+			// the event would be lost with no trace. Returning the 3xx unfollowed
+			// makes it a failed attempt, which is the truth.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				MaxIdleConnsPerHost: cfg.Concurrency,
 				// Subscribers are arbitrary third-party hosts. Keeping

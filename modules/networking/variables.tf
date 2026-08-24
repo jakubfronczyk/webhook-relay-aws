@@ -3,11 +3,6 @@ variable "vpc_cidr" {
   type        = string
 }
 
-variable "environment" {
-  description = "Environment name used for tagging"
-  type        = string
-}
-
 variable "project_name" {
   description = "Project name, used as the prefix for resource Name tags"
   type        = string

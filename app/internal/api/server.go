@@ -20,10 +20,16 @@ type Server struct {
 	store *store.Store
 	queue *queue.Queue
 	log   *slog.Logger
+
+	// allowInsecure permits http:// subscriber URLs. False in AWS, where the
+	// worker's security group opens :443 only, so an http subscriber would time
+	// out on every attempt and reach the DLQ looking like a broken endpoint. The
+	// compose stack sets it true because its fake subscriber speaks http.
+	allowInsecure bool
 }
 
-func New(st *store.Store, q *queue.Queue, log *slog.Logger) *Server {
-	return &Server{store: st, queue: q, log: log}
+func New(st *store.Store, q *queue.Queue, log *slog.Logger, allowInsecure bool) *Server {
+	return &Server{store: st, queue: q, log: log, allowInsecure: allowInsecure}
 }
 
 // Routes uses the stdlib method-and-wildcard patterns from Go 1.22. A router
@@ -92,19 +98,28 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := url.Parse(req.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		writeError(w, http.StatusBadRequest, "url must be an absolute http or https URL")
+	if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && s.allowInsecure)) {
+		writeError(w, http.StatusBadRequest, "url must be an absolute https URL")
 		return
 	}
 
-	sub, err := s.store.CreateSubscription(r.Context(), req.URL, req.EventType)
+	sub, created, err := s.store.CreateSubscription(r.Context(), req.URL, req.EventType)
 	if err != nil {
 		s.log.Error("create subscription", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not create subscription")
 		return
 	}
-	// The signing secret is returned exactly once, here. Nothing reads it back
-	// out over HTTP; only the worker reads it, straight from the database.
+
+	// The signing secret is returned exactly once, on the call that creates the
+	// subscription. Re-registering the same url and event type is idempotent and
+	// deliberately does NOT hand the secret back: this endpoint is unauthenticated,
+	// so otherwise anyone who could guess a subscriber's URL would be given its
+	// signing key and could forge deliveries directly to that subscriber.
+	if !created {
+		sub.Secret = ""
+		writeJSON(w, http.StatusOK, sub)
+		return
+	}
 	writeJSON(w, http.StatusCreated, sub)
 }
 

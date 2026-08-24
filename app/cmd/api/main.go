@@ -38,7 +38,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	st, err := store.Open(ctx, cfg.DatabaseURL)
+	st, err := store.Open(ctx, cfg.DatabaseURL, 10)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(st, q, log).Routes(),
+		Handler:           api.New(st, q, log, cfg.AllowInsecureSubscribers).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

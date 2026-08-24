@@ -61,6 +61,21 @@ is "POST /subscriptions rejects a relative url" \
       -d '{"url":"/hook","event_type":"x"}')" "400"
 is "re-registering the same url and event type is idempotent" \
    "$(subscribe "idem.$RUN" | jq -r .id)" "$(subscribe "idem.$RUN" | jq -r .id)"
+
+# The endpoint is unauthenticated, so handing the secret back on re-registration
+# would give anyone who can guess a subscriber's URL its signing key.
+is "creating a subscription returns its signing secret" \
+   "$(subscribe "secret.$RUN" | jq -r 'if (.secret // "") == "" then "absent" else "present" end')" "present"
+is "re-registering does NOT return the secret" \
+   "$(subscribe "secret.$RUN" | jq -r 'if (.secret // "") == "" then "absent" else "present" end')" "absent"
+
+# Scheme policy. Compose sets ALLOW_INSECURE_SUBSCRIBERS because the fake
+# subscriber speaks http; AWS leaves it unset, where worker egress is :443 only.
+# Only the always-true half is asserted here — a check that cannot fail is worse
+# than no check.
+is "a url with an unsupported scheme is rejected" \
+   "$(code -X POST "$API/subscriptions" -H 'content-type: application/json' \
+      -d '{"url":"ftp://x.test/hook","event_type":"y"}')" "400"
 is "GET /events/{id} on an unknown id is a 404" \
    "$(code "$API/events/00000000-0000-0000-0000-000000000000")" "404"
 

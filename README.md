@@ -167,6 +167,10 @@ part that most needs a test that can fail. It takes about three minutes, most of
 waiting out real backoff and visibility timeouts.
 
 ```
+── api contract
+  ✓ creating a subscription returns its signing secret
+  ✓ re-registering does NOT return the secret
+
 ── retry curve
   ✓ attempts are 1, 2, 3 and fail, fail, succeed
   ✓ first retry waits ~2s (got 2s)
@@ -182,7 +186,7 @@ waiting out real backoff and visibility timeouts.
   ✓ the subscriber's own tally agrees
   ✓ duplicates stayed within WORKER_CONCURRENCY (8)
 
-PASS  22 checks
+PASS  25 checks
 ```
 
 Attempt numbers come from SQS's `ApproximateReceiveCount` rather than from anything the
@@ -272,7 +276,7 @@ cp terraform.tfvars.example terraform.tfvars   # fill in region, project name, C
 terraform init                                  # download the AWS provider, link modules
 terraform plan                                  # review the diff before touching AWS
 terraform apply
-terraform output alb_dns_name
+terraform output queue_url
 ```
 
 ```bash
