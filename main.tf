@@ -49,3 +49,28 @@ module "observability" {
   monthly_budget_usd = var.monthly_budget_usd
   alert_emails       = var.alert_emails
 }
+
+module "messaging" {
+  source = "./modules/messaging"
+
+  project_name = var.project_name
+
+  visibility_timeout_seconds = var.queue_visibility_timeout_seconds
+  max_receive_count          = var.queue_max_receive_count
+}
+
+module "registry" {
+  source = "./modules/registry"
+
+  project_name = var.project_name
+}
+
+module "database" {
+  source = "./modules/database"
+
+  project_name       = var.project_name
+  private_subnet_ids = module.networking.private_subnet_ids
+  rds_sg_id          = module.security.rds_sg_id
+
+  instance_class = var.db_instance_class
+}

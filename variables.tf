@@ -80,3 +80,24 @@ variable "aws_session_token" {
   default     = null
   sensitive   = true
 }
+
+# Messaging
+# These two must stay in step with elasticmq.conf, which is what the local demo runs against.
+variable "queue_visibility_timeout_seconds" {
+  description = "How long a received message stays hidden. Must exceed worst-case delivery time."
+  type        = number
+  default     = 30
+}
+
+variable "queue_max_receive_count" {
+  description = "Receives allowed before SQS moves the message to the dead-letter queue"
+  type        = number
+  default     = 4
+}
+
+# Database
+variable "db_instance_class" {
+  description = "RDS instance size"
+  type        = string
+  default     = "db.t3.micro"
+}

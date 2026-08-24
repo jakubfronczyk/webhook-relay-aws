@@ -78,3 +78,39 @@ demo:
     sleep 3
     curl -sf "localhost:8080/events/$id" | jq .
     curl -sf localhost:9000/stats | jq .
+
+# ---------------------------------------------------------------------------
+# AWS. Everything here bills. `just down` after every session is the guardrail;
+# the Budgets alarm is a lagging notification with an 8-12 hour delay, not
+# protection.
+# ---------------------------------------------------------------------------
+
+deploy:
+    terraform apply
+
+# The actual cost control. ~$2.05/day if left running.
+down:
+    terraform destroy
+
+# Build both service images and push them to ECR. Terraform cannot build images,
+# so this is a recipe rather than a resource.
+#
+# Built natively for ARM64. Fargate defaults to x86_64, and a darwin/arm64 build
+# deployed onto that fails at runtime with "exec format error" — the single most
+# common first deploy failure. ARM64 Fargate is also about 20% cheaper, so the
+# task definitions in Phase 4 set runtime_platform ARM64 and the build stays
+# native. The alternative is --platform linux/amd64 here and emulated builds.
+push tag="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    urls=$(terraform output -json ecr_repository_urls)
+    registry=$(jq -r '.api' <<<"$urls" | cut -d/ -f1)
+    region=$(cut -d. -f4 <<<"$registry")
+    aws ecr get-login-password --region "$region" \
+      | docker login --username AWS --password-stdin "$registry"
+    for svc in api worker; do
+      url=$(jq -r ".$svc" <<<"$urls")
+      echo "building $svc for linux/arm64"
+      docker build --platform linux/arm64 --build-arg BINARY="$svc" -t "$url:{{ tag }}" app/
+      docker push "$url:{{ tag }}"
+    done

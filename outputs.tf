@@ -22,3 +22,23 @@ output "security_group_ids" {
     rds    = module.security.rds_sg_id
   }
 }
+
+output "queue_url" {
+  description = "Delivery queue URL, passed to both services as QUEUE_URL"
+  value       = module.messaging.queue_url
+}
+
+output "dlq_url" {
+  description = "Dead-letter queue URL, for inspecting exhausted messages"
+  value       = module.messaging.dlq_url
+}
+
+output "ecr_repository_urls" {
+  description = "Push targets for just push"
+  value       = module.registry.repository_urls
+}
+
+output "database_endpoint" {
+  description = "RDS hostname. Resolvable only from inside the VPC."
+  value       = module.database.endpoint
+}
