@@ -151,3 +151,55 @@ variable "log_retention_days" {
   type        = number
   default     = 7
 }
+
+# Autoscaling
+variable "queue_name" {
+  description = "Delivery queue name, the QueueName dimension on its CloudWatch metrics"
+  type        = string
+}
+
+variable "alb_arn_suffix" {
+  description = "Load balancer arn_suffix, half of the ALBRequestCountPerTarget resource label"
+  type        = string
+}
+
+variable "target_group_arn_suffix" {
+  description = "Target group arn_suffix, the other half of the resource label"
+  type        = string
+}
+
+variable "api_min_tasks" {
+  description = "Floor for the api service, one per availability zone"
+  type        = number
+  default     = 2
+}
+
+variable "api_max_tasks" {
+  description = "Ceiling for the api service"
+  type        = number
+  default     = 6
+}
+
+variable "worker_min_tasks" {
+  description = "Floor for the worker service. One task keeps the queue drained when idle."
+  type        = number
+  default     = 1
+}
+
+variable "worker_max_tasks" {
+  description = "Ceiling for the worker service, and the top of the scaling graph in the demo"
+  type        = number
+  default     = 18
+}
+
+variable "api_requests_per_target" {
+  description = "Target requests per task per minute for the api"
+  type        = number
+  default     = 600
+}
+
+variable "worker_backlog_per_task" {
+  description = "Target visible messages per worker task. Lower scales out sooner and costs more."
+  type        = number
+  default     = 20
+}

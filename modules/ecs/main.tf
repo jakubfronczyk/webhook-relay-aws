@@ -9,9 +9,10 @@ resource "aws_ecs_cluster" "main" {
   name = var.project_name
 
   setting {
-    # Container Insights is billed per task.
+    # Required: RunningTaskCount is only emitted by Container Insights, and the worker
+    # policy divides by it. Billed per task.
     name  = "containerInsights"
-    value = "disabled"
+    value = "enabled"
   }
 
   tags = {
@@ -261,11 +262,6 @@ resource "aws_ecs_task_definition" "worker" {
     Name = "${var.project_name}-worker"
   }
 }
-
-# ---------------------------------------------------------------------------
-# Services
-# ---------------------------------------------------------------------------
-
 resource "aws_ecs_service" "api" {
   name            = "${var.project_name}-api"
   cluster         = aws_ecs_cluster.main.id
@@ -303,6 +299,11 @@ resource "aws_ecs_service" "api" {
     rollback = true
   }
 
+  # Autoscaling owns desired_count after the first apply.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
   tags = {
     Name = "${var.project_name}-api"
   }
@@ -337,7 +338,123 @@ resource "aws_ecs_service" "worker" {
     rollback = true
   }
 
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
   tags = {
     Name = "${var.project_name}-worker"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Autoscaling
+# ---------------------------------------------------------------------------
+
+resource "aws_appautoscaling_target" "api" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = var.api_min_tasks
+  max_capacity       = var.api_max_tasks
+}
+
+resource "aws_appautoscaling_target" "worker" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.worker.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = var.worker_min_tasks
+  max_capacity       = var.worker_max_tasks
+}
+
+# Requests per target, not CPU: the api waits on Postgres and SQS, so CPU moves late.
+resource "aws_appautoscaling_policy" "api_requests" {
+  name               = "${var.project_name}-api-requests-per-target"
+  policy_type        = "TargetTrackingScaling"
+  service_namespace  = aws_appautoscaling_target.api.service_namespace
+  resource_id        = aws_appautoscaling_target.api.resource_id
+  scalable_dimension = aws_appautoscaling_target.api.scalable_dimension
+
+  target_tracking_scaling_policy_configuration {
+    target_value = var.api_requests_per_target
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      # The only predefined metric needing a label; the target group cannot be inferred.
+      resource_label = "${var.alb_arn_suffix}/${var.target_group_arn_suffix}"
+    }
+
+    scale_in_cooldown  = 120
+    scale_out_cooldown = 30
+  }
+}
+
+# Backlog per task, not queue depth: an absolute depth does not scale with fleet size and
+# oscillates. The numerator is the visible count only, since in-flight messages already have
+# a task working on them.
+resource "aws_appautoscaling_policy" "worker_backlog" {
+  name               = "${var.project_name}-worker-backlog-per-task"
+  policy_type        = "TargetTrackingScaling"
+  service_namespace  = aws_appautoscaling_target.worker.service_namespace
+  resource_id        = aws_appautoscaling_target.worker.resource_id
+  scalable_dimension = aws_appautoscaling_target.worker.scalable_dimension
+
+  target_tracking_scaling_policy_configuration {
+    target_value = var.worker_backlog_per_task
+
+    customized_metric_specification {
+      metrics {
+        id    = "backlog"
+        label = "Backlog per task"
+        # IF guards the division; RunningTaskCount reports 0 during a cold start.
+        expression  = "visible / IF(tasks > 0, tasks, 1)"
+        return_data = true
+      }
+
+      metrics {
+        id          = "visible"
+        return_data = false
+
+        metric_stat {
+          metric {
+            namespace   = "AWS/SQS"
+            metric_name = "ApproximateNumberOfMessagesVisible"
+
+            dimensions {
+              name  = "QueueName"
+              value = var.queue_name
+            }
+          }
+          stat = "Average"
+        }
+      }
+
+      metrics {
+        id          = "tasks"
+        return_data = false
+
+        metric_stat {
+          metric {
+            namespace   = "ECS/ContainerInsights"
+            metric_name = "RunningTaskCount"
+
+            dimensions {
+              name  = "ClusterName"
+              value = aws_ecs_cluster.main.name
+            }
+
+            dimensions {
+              name  = "ServiceName"
+              value = aws_ecs_service.worker.name
+            }
+          }
+          stat = "Average"
+        }
+      }
+    }
+
+    # Slow in, fast out: scaling in early strands a backlog, scaling out early costs cents.
+    scale_in_cooldown  = 180
+    scale_out_cooldown = 30
   }
 }

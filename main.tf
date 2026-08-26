@@ -101,8 +101,9 @@ module "ecs" {
   image_urls = module.registry.repository_urls
   image_tag  = var.image_tag
 
-  queue_url = module.messaging.queue_url
-  queue_arn = module.messaging.queue_arn
+  queue_url  = module.messaging.queue_url
+  queue_arn  = module.messaging.queue_arn
+  queue_name = module.messaging.queue_name
 
   db_host       = module.database.endpoint
   db_port       = var.db_port
@@ -112,6 +113,11 @@ module "ecs" {
 
   api_port           = var.api_port
   worker_concurrency = var.worker_concurrency
+
+  alb_arn_suffix          = module.alb.alb_arn_suffix
+  target_group_arn_suffix = module.alb.target_group_full_name
+  worker_max_tasks        = var.worker_max_tasks
+  worker_backlog_per_task = var.worker_backlog_per_task
 
   # The listener must exist before the api service can register targets.
   depends_on = [module.alb]

@@ -17,3 +17,8 @@ output "target_group_full_name" {
   description = "Dimension value for the ALB's CloudWatch metrics, which the api's request-count autoscaling policy needs in Phase 5"
   value       = aws_lb_target_group.api.arn_suffix
 }
+
+output "alb_arn_suffix" {
+  description = "Dimension value for the load balancer's CloudWatch metrics, and half of the ALBRequestCountPerTarget resource label"
+  value       = aws_lb.main.arn_suffix
+}

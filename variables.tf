@@ -127,3 +127,16 @@ variable "worker_concurrency" {
   type        = number
   default     = 8
 }
+
+# Autoscaling
+variable "worker_max_tasks" {
+  description = "Ceiling for the worker service, and the top of the scaling graph in the demo"
+  type        = number
+  default     = 18
+}
+
+variable "worker_backlog_per_task" {
+  description = "Target visible messages per worker task"
+  type        = number
+  default     = 20
+}
