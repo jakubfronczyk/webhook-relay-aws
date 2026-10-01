@@ -1,11 +1,18 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.10"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+  }
+
+  # Partial configuration: bucket and region come from bootstrap/ via just init.
+  backend "s3" {
+    key          = "webhook-relay/terraform.tfstate"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 

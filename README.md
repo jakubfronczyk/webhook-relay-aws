@@ -272,16 +272,19 @@ boundary; the system provides at-least-once delivery and a documented idempotenc
 ## Usage
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars   # fill in region, project name, CIDRs
-terraform init                                  # download the AWS provider, link modules
-terraform plan                                  # review the diff before touching AWS
-terraform apply
+cp terraform.tfvars.example terraform.tfvars   # fill in region, alert email, CIDRs
+just state                                      # once per account: the S3 state bucket
+just init                                       # point the root configuration at it
+just up                                         # budget and ECR, push images, then everything
 terraform output alb_dns_name
 ```
 
 ```bash
-terraform destroy
+just down
 ```
+
+State lives in S3 with native locking (`use_lockfile`). The bucket is created by `bootstrap/`,
+a separate root with local state, because a backend cannot create the bucket it is stored in.
 
 The NAT gateway, ALB, and RDS instance bill hourly whether or not traffic flows —
 approximately $2–3 per day for this stack.

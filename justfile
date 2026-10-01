@@ -11,9 +11,12 @@ check: fmt validate audit
 fmt:
     terraform fmt -recursive
 
-# Validate the configuration without contacting AWS
+# Validate both roots without contacting AWS
 validate:
+    terraform init -backend=false -input=false >/dev/null
     terraform validate
+    terraform -chdir=bootstrap init -input=false >/dev/null
+    terraform -chdir=bootstrap validate
 
 # Counts rule arguments, not lines, so a comment cannot inflate the number.
 
@@ -82,6 +85,27 @@ demo:
 # --- aws ------------------------------------------------------------------
 # Everything here bills. `just down` after every session is the guardrail; the
 # Budgets alarm lags by 8-12 hours and is a notification, not protection.
+
+# Once per account. The bucket outlives just down; prevent_destroy refuses to delete it.
+
+# Create the state bucket, the one resource the root configuration cannot create
+state:
+    terraform -chdir=bootstrap init -input=false
+    terraform -chdir=bootstrap apply
+
+# Point the root configuration at the bucket that bootstrap/ created
+init:
+    terraform init -input=false \
+      -backend-config="bucket=$(terraform -chdir=bootstrap output -raw state_bucket)" \
+      -backend-config="region=$(terraform -chdir=bootstrap output -raw region)"
+
+# A full apply first would start services on an image tag that does not exist yet.
+
+# Empty account to running services: budget and ECR first, then images, then everything else
+up:
+    terraform apply -target=module.observability -target=module.registry
+    just push
+    just deploy
 
 # The short commit, with -dirty appended when the tree has uncommitted changes.
 
