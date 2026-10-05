@@ -1,0 +1,69 @@
+# Every gate that needs no AWS account: Terraform static checks on all three roots, the Go
+# checks, and the full delivery-guarantee suite against the compose stack.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.4
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: fmt
+        run: terraform fmt -check -recursive
+
+      - name: validate
+        run: |
+          for root in . bootstrap loadtest; do
+            echo "::group::$root"
+            terraform -chdir=$root init -backend=false -input=false
+            terraform -chdir=$root validate
+            echo "::endgroup::"
+          done
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --format compact
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -race ./...
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: go
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: delivery guarantees against the compose stack
+        run: ./scripts/verify-local.sh
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
