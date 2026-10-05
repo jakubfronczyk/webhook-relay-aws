@@ -117,6 +117,25 @@ is "exactly maxReceiveCount attempts, then it stops" "$(attempts "$id" | jq 'len
 is "the message moved to the dead-letter queue" \
    "$(attr webhook-relay-deliveries-dlq ApproximateNumberOfMessages)" "$want"
 
+# Store errors used to take the subscriber-failure path, so ~30s of outage at the
+# compose backoff sent everything in flight to the DLQ having contacted no subscriber.
+step "a postgres outage does not exhaust the retry budget"
+M=40
+dlq_before=$(attr webhook-relay-deliveries-dlq ApproximateNumberOfMessages)
+sink_with RESPONSE_DELAY=1s; subscribe "outage.$RUN" >/dev/null
+docker compose stop worker >/dev/null 2>&1
+seq 1 $M | xargs -P 8 -I_ curl -s -o /dev/null -X POST "$API/events" \
+  -H 'content-type: application/json' -d "{\"type\":\"outage.$RUN\",\"payload\":{}}"
+docker compose start worker >/dev/null 2>&1; sleep 2
+echo "  stopping postgres for 45s mid-drain…"
+docker compose stop postgres >/dev/null 2>&1; sleep 45
+docker compose up -d --wait postgres >/dev/null 2>&1
+until_ 120 drained || echo "  the queue never fully drained"
+is "no message reached the dead-letter queue" \
+   "$(attr webhook-relay-deliveries-dlq ApproximateNumberOfMessages)" "$dlq_before"
+is "every event reached the subscriber after recovery" \
+   "$(curl -sf "$SINK/stats" | jq -r .unique_events)" "$M"
+
 step "durability: the fleet dies mid-drain"
 sink_with RESPONSE_DELAY=200ms; subscribe "kill.$RUN" >/dev/null
 docker compose stop worker >/dev/null 2>&1

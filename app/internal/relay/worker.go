@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jakubfronczyk/webhook-relay-aws/app/internal/config"
@@ -26,6 +27,10 @@ type Worker struct {
 	cfg    config.Config
 	log    *slog.Logger
 	client *http.Client
+
+	// storeDown stops the poll loop, since every receive during an outage
+	// consumes one of maxReceiveCount without contacting any subscriber.
+	storeDown atomic.Bool
 }
 
 func New(st *store.Store, q *queue.Queue, cfg config.Config, log *slog.Logger) *Worker {
@@ -59,6 +64,9 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	for {
 		if ctx.Err() != nil {
+			return nil
+		}
+		if w.storeDown.Load() && !w.waitForStore(ctx) {
 			return nil
 		}
 
@@ -103,15 +111,13 @@ func (w *Worker) handle(ctx context.Context, m queue.Message) {
 		return
 	}
 	if err != nil {
-		log.Error("load event", "err", err)
-		w.retry(ctx, m, log)
+		w.storeFailed(ctx, "load event", err, log)
 		return
 	}
 
 	subs, err := w.store.SubscriptionsFor(ctx, ev.Type)
 	if err != nil {
-		log.Error("load subscriptions", "err", err)
-		w.retry(ctx, m, log)
+		w.storeFailed(ctx, "load subscriptions", err, log)
 		return
 	}
 	if len(subs) == 0 {
@@ -124,8 +130,7 @@ func (w *Worker) handle(ctx context.Context, m queue.Message) {
 	// subscriber re-POSTs to every subscriber that already succeeded.
 	delivered, err := w.store.Delivered(ctx, ev.ID)
 	if err != nil {
-		log.Error("load prior deliveries", "err", err)
-		w.retry(ctx, m, log)
+		w.storeFailed(ctx, "load prior deliveries", err, log)
 		return
 	}
 
@@ -221,6 +226,37 @@ func (w *Worker) ack(ctx context.Context, m queue.Message, log *slog.Logger) {
 	if err := w.queue.Delete(ctx, m.ReceiptHandle); err != nil {
 		// A failed delete causes redelivery, which the already-delivered check absorbs.
 		log.Error("delete message", "err", err)
+	}
+}
+
+// storeFailed leaves the message to reappear after its visibility timeout and
+// pauses polling, so an outage costs each in-flight message one receive in total.
+func (w *Worker) storeFailed(ctx context.Context, what string, err error, log *slog.Logger) {
+	if ctx.Err() != nil {
+		return
+	}
+	log.Error(what, "err", err)
+	if !w.storeDown.Swap(true) {
+		w.log.Warn("store unreachable, pausing the poll loop")
+	}
+}
+
+// waitForStore pings until Postgres answers, returning false if the context ends first.
+func (w *Worker) waitForStore(ctx context.Context) bool {
+	for wait := time.Second; ; wait = min(wait*2, 30*time.Second) {
+		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := w.store.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			w.storeDown.Store(false)
+			w.log.Info("store reachable, resuming the poll loop")
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(wait):
+		}
 	}
 }
 
