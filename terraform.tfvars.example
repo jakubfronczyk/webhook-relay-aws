@@ -4,11 +4,7 @@
 # AWS configuration
 aws_region = "us-east-1"
 
-# Credentials are optional here — the provider also reads the standard
-# AWS_* environment variables or your AWS CLI profile, which is preferred.
-# aws_access_key_id     = "YOUR_ACCESS_KEY_ID"
-# aws_secret_access_key = "YOUR_SECRET_ACCESS_KEY"
-# aws_session_token     = "YOUR_SESSION_TOKEN"
+# Credentials come from AWS_PROFILE, never from this file.
 
 # Project configuration
 environment  = "dev"

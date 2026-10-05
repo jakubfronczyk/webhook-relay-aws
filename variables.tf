@@ -59,28 +59,6 @@ variable "private_subnet_secondary_cidr" {
   default     = "10.0.12.0/24"
 }
 
-# AWS Credentials (optional - can use environment variables or AWS CLI config instead)
-variable "aws_access_key_id" {
-  description = "AWS Access Key ID (optional - can use environment variables or AWS CLI config)"
-  type        = string
-  default     = null
-  sensitive   = true
-}
-
-variable "aws_secret_access_key" {
-  description = "AWS Secret Access Key (optional - can use environment variables or AWS CLI config)"
-  type        = string
-  default     = null
-  sensitive   = true
-}
-
-variable "aws_session_token" {
-  description = "AWS Session Token for temporary credentials (optional)"
-  type        = string
-  default     = null
-  sensitive   = true
-}
-
 # Messaging. Must stay in step with elasticmq.conf, which the local demo runs against.
 variable "queue_visibility_timeout_seconds" {
   description = "How long a received message stays hidden. Must exceed worst-case delivery time."
