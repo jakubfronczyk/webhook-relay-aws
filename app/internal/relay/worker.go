@@ -47,6 +47,7 @@ func New(st *store.Store, q *queue.Queue, cfg config.Config, log *slog.Logger) *
 				return http.ErrUseLastResponse
 			},
 			Transport: &http.Transport{
+				DialContext:         newDialer(cfg.AllowPrivateSubscribers).DialContext,
 				MaxIdleConnsPerHost: cfg.Concurrency,
 				// Subscribers are arbitrary hosts, mostly not contacted twice in a row.
 				IdleConnTimeout: 30 * time.Second,

@@ -30,6 +30,9 @@ type Config struct {
 	DeliveryTimeout time.Duration
 	PollWaitTime    int32 // SQS long-poll seconds, 20 is the maximum
 	BatchSize       int32
+	// AllowPrivateSubscribers permits delivery to non-public addresses. Compose sets it,
+	// because the fake subscriber has a private address; AWS does not.
+	AllowPrivateSubscribers bool
 }
 
 func Load() (Config, error) {
@@ -40,6 +43,7 @@ func Load() (Config, error) {
 		AWSRegion:                env("AWS_REGION", "us-east-1"),
 		ListenAddr:               env("LISTEN_ADDR", ":8080"),
 		AllowInsecureSubscribers: env("ALLOW_INSECURE_SUBSCRIBERS", "") == "true",
+		AllowPrivateSubscribers:  env("ALLOW_PRIVATE_SUBSCRIBERS", "") == "true",
 		Concurrency:              envInt("WORKER_CONCURRENCY", 8),
 		BackoffBase:              envDuration("BACKOFF_BASE", 30*time.Second),
 		BackoffMax:               envDuration("BACKOFF_MAX", 15*time.Minute),

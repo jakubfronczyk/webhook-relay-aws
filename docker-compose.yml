@@ -71,6 +71,8 @@ services:
       BACKOFF_MAX: 30s
       POLL_WAIT_SECONDS: "5"
       WORKER_CONCURRENCY: "8"
+      # The fake subscriber has a private address. Unset in AWS, where those are refused.
+      ALLOW_PRIVATE_SUBSCRIBERS: "true"
     depends_on:
       api:
         condition: service_started
