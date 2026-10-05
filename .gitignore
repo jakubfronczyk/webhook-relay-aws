@@ -28,3 +28,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Build output
+dist/
+loadtest/.build/

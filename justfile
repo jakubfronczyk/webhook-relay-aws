@@ -11,12 +11,14 @@ check: fmt validate audit
 fmt:
     terraform fmt -recursive
 
-# Validate both roots without contacting AWS
+# Validate all three roots without contacting AWS
 validate:
     terraform init -backend=false -input=false >/dev/null
     terraform validate
     terraform -chdir=bootstrap init -input=false >/dev/null
     terraform -chdir=bootstrap validate
+    terraform -chdir=loadtest init -backend=false -input=false >/dev/null
+    terraform -chdir=loadtest validate
 
 # Counts rule arguments, not lines, so a comment cannot inflate the number.
 
@@ -93,11 +95,16 @@ state:
     terraform -chdir=bootstrap init -input=false
     terraform -chdir=bootstrap apply
 
-# Point the root configuration at the bucket that bootstrap/ created
+# Point the root and loadtest configurations at the bucket that bootstrap/ created
 init:
-    terraform init -input=false \
-      -backend-config="bucket=$(terraform -chdir=bootstrap output -raw state_bucket)" \
-      -backend-config="region=$(terraform -chdir=bootstrap output -raw region)"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bucket=$(terraform -chdir=bootstrap output -raw state_bucket)
+    region=$(terraform -chdir=bootstrap output -raw region)
+    for root in . loadtest; do
+      terraform -chdir=$root init -input=false -reconfigure \
+        -backend-config="bucket=$bucket" -backend-config="region=$region"
+    done
 
 # A full apply first would start services on an image tag that does not exist yet.
 
@@ -120,8 +127,9 @@ version:
 deploy:
     terraform apply -var image_tag=$(just version)
 
-# Destroy everything. The actual cost control — ~$2.05/day if left running.
+# Destroy everything, the sink included. The actual cost control — ~$2.05/day if left running.
 down:
+    terraform -chdir=loadtest destroy
     terraform destroy
 
 # Terraform cannot build images. Built natively for ARM64, matching
@@ -148,3 +156,34 @@ push:
     done
     echo
     echo "pushed $tag — now: just deploy"
+
+# --- load test ------------------------------------------------------------
+# The sink and the generator are test fixtures, not part of the system.
+
+# Deploy the counting sink: HTTP API, Lambda, DynamoDB. Zero cost while idle.
+sink:
+    terraform -chdir=loadtest apply
+
+# Subscribe the sink to an event type under a run label; extra is e.g. fail_until=3
+subscribe-sink type run extra="":
+    curl -sf -X POST "http://$(terraform output -raw alb_dns_name)/subscriptions" \
+      -H 'content-type: application/json' \
+      -d "{\"url\":\"$(terraform -chdir=loadtest output -raw sink_url)/hook?run={{ run }}{{ if extra != "" { "&" + extra } else { "" } }}\",\"event_type\":\"{{ type }}\"}" | jq .
+
+# What the sink received for a run label
+sink-stats run:
+    @curl -sf "$(terraform -chdir=loadtest output -raw sink_url)/stats?run={{ run }}" | jq .
+
+# CloudShell runs on x86_64. Upload the binary through its Actions menu.
+
+# Build the load generator for AWS CloudShell, in the same region as the ALB
+loadgen-build:
+    cd app && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" \
+      -o ../dist/loadgen ./cmd/loadgen
+    @echo "dist/loadgen — upload to CloudShell, then: just loadgen-cmd"
+
+# Print the loadgen invocation for this deployment, ready to paste into CloudShell
+loadgen-cmd type="load.test" profile="10:30s,1000:5s,10:120s":
+    @echo "./loadgen -target http://$(terraform output -raw alb_dns_name) -type {{ type }} \\"
+    @echo "  -profile {{ profile }} -queue-url $(terraform output -raw queue_url) \\"
+    @echo "  -cluster $(terraform output -raw ecs_cluster_name) -service $(terraform output -raw worker_service_name) > {{ type }}.csv"

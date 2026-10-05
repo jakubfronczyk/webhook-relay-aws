@@ -120,6 +120,13 @@ redelivered because a *different* subscriber failed, and a request that times ou
 retried even though the subscriber may well have processed it — from the sender's side those
 two outcomes are indistinguishable.
 
+The worker calls URLs that strangers register, from inside the VPC, so it refuses to connect
+to anything that is not a public address. Loopback, RFC 1918, link-local (where the ECS
+credentials endpoint lives) and CGNAT ranges are all rejected. The check runs in the dialer's
+`Control` hook, after DNS resolution and before the connection opens, so a hostname that
+resolves to a public IP at registration and an internal one later is still refused. Redirects
+are never followed, for the same reason and because Go rewrites a redirected POST into a GET.
+
 ---
 
 ## Application
@@ -180,13 +187,17 @@ waiting out real backoff and visibility timeouts.
   ✓ exactly maxReceiveCount attempts, then it stops
   ✓ the message moved to the dead-letter queue
 
+── a postgres outage does not exhaust the retry budget
+  ✓ no message reached the dead-letter queue
+  ✓ every event reached the subscriber after recovery
+
 ── durability: the fleet dies mid-drain
   ✓ the api accepted all 200
   ✓ every accepted event reached the subscriber
   ✓ the subscriber's own tally agrees
   ✓ duplicates stayed within WORKER_CONCURRENCY (8)
 
-PASS  25 checks
+PASS  27 checks
 ```
 
 Attempt numbers come from SQS's `ApproximateReceiveCount` rather than from anything the
@@ -201,6 +212,13 @@ because those are exactly the deliveries in flight when the process died — alr
 by the subscriber, never acknowledged to SQS, so redelivered once the visibility timeout
 expired. That is what at-least-once means, and it is why every delivery carries a stable
 event id.
+
+The outage block guards a subtler failure. `maxReceiveCount` counts receives, not failed
+deliveries, so a worker that keeps polling while Postgres is down spends a message's whole
+retry budget without contacting a single subscriber. Against the earlier worker, which
+treated a database error like a subscriber error, a 45 second outage sent 16 of 40 events to
+the dead-letter queue. The worker now pauses its poll loop until Postgres answers a ping, so
+an outage of any length costs each in-flight message one receive.
 
 ---
 
@@ -223,6 +241,8 @@ app/
   cmd/worker/            delivery service
   cmd/sink/              fake subscriber, counts what it receives — test fixture, not part
                          of the system
+  cmd/loadgen/           rate-profile load generator, one CSV row per second of latency,
+                         backlog and worker task count
   internal/queue/        one SQS client for both ElasticMQ and AWS
   internal/relay/        the delivery loop, the backoff curve
   internal/sign/         HMAC signing, and the verification half the sink uses
@@ -233,6 +253,9 @@ docker-compose.yml       the whole system locally: no AWS account, no credential
 elasticmq.conf           local stand-in for SQS, same wire protocol
 justfile                 terraform checks, the network-policy audit, the local demos
 scripts/verify-local.sh  asserts every delivery guarantee from a cold start
+loadtest/                the AWS counting sink, HTTP API plus Lambda plus DynamoDB, as its
+                         own root with its own state
+.github/workflows/       fmt, validate and tflint on all three roots, Go checks, just verify
 ```
 
 Security groups live in their own module rather than beside the resources they protect, so
@@ -279,8 +302,17 @@ just up                                         # budget and ECR, push images, t
 terraform output alb_dns_name
 ```
 
+Load test, with the sink outside the VPC so deliveries take the real NAT path:
+
 ```bash
-just down
+just sink                                       # counting sink, zero cost while idle
+just subscribe-sink load.test burst1            # tally under the run label burst1
+just loadgen-build && just loadgen-cmd          # binary and command for CloudShell
+just sink-stats burst1                          # reconcile against loadgen's accepted count
+```
+
+```bash
+just down                                       # sink first, then the platform
 ```
 
 State lives in S3 with native locking (`use_lockfile`). The bucket is created by `bootstrap/`,
